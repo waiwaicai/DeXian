@@ -1,0 +1,17 @@
+# Xcode / 构建产物
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# xcodegen 生成物（由 project.yml 每次生成）
+DeXian.xcodeproj/
+Support/Info.plist
+
+# 系统
+.DS_Store
+Thumbs.db

@@ -1,0 +1,90 @@
+name: DeXian
+options:
+  bundleIdPrefix: com.dexian
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_BITCODE: NO
+
+targets:
+  DeXian:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: DeXian
+        excludes:
+          - "**/*.md"
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: 得闲
+        CFBundleName: DeXian
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIUserInterfaceStyle: Automatic
+        ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes:
+          - audio
+        NSCameraUsageDescription: 用于扫描书源分享二维码
+        NSLocalNetworkUsageDescription: 书源可能位于局域网（例如自建的阅读服务器）
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoadsInWebContent: true
+        LSApplicationQueriesSchemes:
+          - http
+          - https
+        UIApplicationSupportsIndirectInputEvents: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dexian.reader
+        PRODUCT_NAME: DeXian
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0.0"
+
+  DeXianTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Tests/DeXianTests
+    dependencies:
+      - target: DeXian
+
+schemes:
+  DeXian:
+    build:
+      targets:
+        DeXian: all
+        DeXianTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+    profile:
+      config: Release
+    archive:
+      config: Release
