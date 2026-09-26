@@ -351,14 +351,14 @@ enum SourceImporter {
         if dictionary["sortUrl"] != nil { return .rss }
         // articleStyle / loadWithBaseUrl / singleUrl 是订阅源字段，书源不使用，
         // 因此哪怕没有任何规则也能判定为订阅源（例：源仓库官方纯净）。
-        if dictionary["articleStyle"] != nil { return .rss }
         if dictionary["loadWithBaseUrl"] != nil && dictionary["bookSourceType"] == nil { return .rss }
-
         let hasName = dictionary["sourceName"] != nil || dictionary["name"] != nil
             || dictionary["bookSourceName"] != nil || dictionary["title"] != nil
         let hasURL = dictionary["sourceUrl"] != nil || dictionary["url"] != nil
             || dictionary["bookSourceUrl"] != nil
         guard hasName, hasURL else { return .none }
+        // 调用方明确声明按订阅源导入（RSS 页签 / 订阅源文件）时以此为准
+        if preferRss { return .rss }
         // 有正文规则但没有任何书籍结构时，按订阅源处理
         if dictionary["ruleContent"] != nil { return .rss }
         // 名字里带"订阅"的按订阅源处理
