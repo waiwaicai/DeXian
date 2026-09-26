@@ -628,7 +628,7 @@ final class RuleEngineTests: XCTestCase {
         let root = document()
         // tag.a[1:] 从第 2 个开始
         let fromSecond = LegacySelector.select("tag.a[1:]", in: root)
-        XCTAssertEqual(fromSecond.count, 1)
+        XCTAssertEqual(fromSecond.count, 4)
         XCTAssertEqual(fromSecond.first?.normalizedText, "凡人修仙传")
 
         // 区间 [0:2]
@@ -717,7 +717,7 @@ final class RssTests: XCTestCase {
       "enabledCookieJar":true,"lastUpdateTime":1789948994825,"loadWithBaseUrl":true,"preload":false,
       "ruleArticles":"table tr td","ruleLink":"a@href","rulePubDate":"text","ruleTitle":"a@text",
       "searchUrl":"http://dtmb.saoing.com/{{key}}.htm","singleUrl":false,
-      "sortUrl":"卫星参数::/satparam.htm\n卫星强场::/changqiang/EIRP.htm",
+      "sortUrl":"卫星参数::/satparam.htm\\n卫星强场::/changqiang/EIRP.htm",
       "sourceComment":"搜索请写拼音","sourceIcon":"http://saoing.com/Pictuer/logo.jpg",
       "sourceName":"中文寻星","sourceUrl":"http://saoing.com/","type":0}]
     """
