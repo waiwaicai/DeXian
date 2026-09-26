@@ -5,6 +5,15 @@ enum BookType: Int, Codable {
     case audio = 1
     case image = 2
     case file = 3
+
+    var displayName: String {
+        switch self {
+        case .text: return "小说"
+        case .audio: return "有声"
+        case .image: return "漫画"
+        case .file: return "文件"
+        }
+    }
 }
 
 /// 搜索 / 发现得到的书籍条目
