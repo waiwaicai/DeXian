@@ -1,0 +1,92 @@
+name: Build IPA
+
+# 云编译：推送到 main / 手动触发 / 打 tag 都会出包
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 报告 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 安装 xcodegen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 运行单元测试
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project DeXian.xcodeproj \
+            -scheme DeXian \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=iPhone 15,OS=latest" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 构建未签名 IPA
+        run: |
+          chmod +x scripts/make_ipa.sh
+          ./scripts/make_ipa.sh
+
+      - name: 整理产物
+        run: |
+          mkdir -p artifacts
+          cp outputs/DeXian.ipa "artifacts/DeXian-unsigned-${{ github.run_number }}.ipa"
+          if [ -f Preview/ui-layout.png ]; then cp Preview/ui-layout.png artifacts/; fi
+          ls -la artifacts
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeXian-unsigned-ipa
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Attach IPA to Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: DeXian-unsigned-ipa
+          path: artifacts
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.ipa
+          generate_release_notes: true
+          body: |
+            自动构建的未签名 IPA。
+            安装方式：使用 AltStore / SideStore / Sideloadly / TrollStore 自签后安装。
