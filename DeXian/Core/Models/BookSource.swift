@@ -85,7 +85,7 @@ struct ExploreRule: Codable, Hashable {
 
 /// 详情页规则
 struct BookInfoRule: Codable, Hashable {
-    var init: String?
+    var initRule: String?
     var name: String?
     var author: String?
     var kind: String?
@@ -99,7 +99,7 @@ struct BookInfoRule: Codable, Hashable {
     init() {}
 
     init(dict: [String: Any] = [:]) {
-        init = dict.str("init", "initRule")
+        initRule = dict.str("init", "initRule")
         name = dict.str("name", "bookName", "title")
         author = dict.str("author", "bookAuthor")
         kind = dict.str("kind", "category", "class", "type")
@@ -160,7 +160,7 @@ struct ContentRule: Codable, Hashable {
 
 /// 发现分类
 struct ExploreCategory: Codable, Hashable, Identifiable {
-    var id: String { "\\(title ?? "")|\\(url ?? "")" }
+    var id: String { "\(title ?? "")|\(url ?? "")" }
     var title: String?
     var url: String?
     /// 二级分类
@@ -219,7 +219,7 @@ struct BookSource: Codable, Hashable, Identifiable {
         let urlValue = dict.str("bookSourceUrl", "bookSourceURL", "sourceUrl", "url", "baseUrl", "host") ?? ""
         let nameValue = dict.str("bookSourceName", "sourceName", "name", "title") ?? "未命名书源"
         // 稳定 id：优先用书源自带 key，其次由 name+url 派生，保证重复导入不产生副本。
-        id = dict.str("bookSourceKey", "key", "id", "sourceId") ?? "\\(nameValue)|\\(urlValue)".stableHash
+        id = dict.str("bookSourceKey", "key", "id", "sourceId") ?? "\(nameValue)|\(urlValue)".stableHash
 
         name = nameValue
         url = urlValue.trimmed

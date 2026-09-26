@@ -9,7 +9,7 @@ enum BookType: Int, Codable {
 
 /// 搜索 / 发现得到的书籍条目
 struct SearchBook: Codable, Hashable, Identifiable {
-    var id: String { "\\(origin)|\\(bookUrl)" }
+    var id: String { "\(origin)|\(bookUrl)" }
     var name: String
     var author: String
     var kind: String?
@@ -30,7 +30,7 @@ struct SearchBook: Codable, Hashable, Identifiable {
 
 /// 章节
 struct BookChapter: Codable, Hashable, Identifiable {
-    var id: String { "\\(index)|\\(url)" }
+    var id: String { "\(index)|\(url)" }
     var url: String
     var title: String
     var index: Int
@@ -43,7 +43,7 @@ struct BookChapter: Codable, Hashable, Identifiable {
 
     var displayTitle: String {
         let value = title.trimmed
-        return value.isEmpty ? "第\\(index + 1)章" : value
+        return value.isEmpty ? "第\(index + 1)章" : value
     }
 }
 
@@ -104,7 +104,7 @@ struct ShelfBook: Codable, Hashable, Identifiable {
     init(search: SearchBook, info: BookInfo?, tocUrl: String?, groupId: String? = nil) {
         let resolvedName = (info?.name.nilIfBlank) ?? search.name
         let resolvedAuthor = (info?.author.nilIfBlank) ?? search.author
-        id = "\\(search.origin)|\\(search.bookUrl)"
+        id = "\(search.origin)|\(search.bookUrl)"
         name = resolvedName
         author = resolvedAuthor
         coverUrl = info?.coverUrl?.nilIfBlank ?? search.coverUrl
