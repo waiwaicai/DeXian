@@ -105,9 +105,11 @@ final class RuleEngineTests: XCTestCase {
         let root = document()
         // 第一个 item
         XCTAssertEqual(XPathEngine.nodes("//div[@class='item'][1]", document: root).count, 1)
-        // 最后一个 a
-        let last = XPathEngine.nodes("//div[@class='item']/h3/a[last()]", document: root)
-        XCTAssertEqual(last.first?.normalizedText, "雪中悍刀行")
+        // 最后一个 item：last() 与 [1] 一样按上下文节点求值，作用在同级集合上
+        let lastItem = XPathEngine.nodes("//div[@class='item'][last()]/h3/a", document: root)
+        XCTAssertEqual(lastItem.first?.normalizedText, "雪中悍刀行")
+        // 每个 h3 只有一个 a，所以 a 这一级的 [last()] 全命中（与浏览器一致）
+        XCTAssertEqual(XPathEngine.nodes("//div[@class='item']/h3/a[last()]", document: root).count, 3)
     }
 
     func testXPathFunctions() {
