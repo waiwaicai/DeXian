@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// 书籍详情：展示信息、加入书架、查看章节
 struct BookDetailView: View {
@@ -13,6 +14,9 @@ struct BookDetailView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var shelfBook: ShelfBook?
+    /// 整本离线缓存进度
+    @State private var cacheProgress = ChapterCache.Progress()
+    private let cacheTicker = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -48,6 +52,9 @@ struct BookDetailView: View {
         }
         .navigationTitle(displayInfo.name.isEmpty ? searchBook.name : displayInfo.name)
         .navigationBarTitleDisplayMode(.inline)
+        .onReceive(cacheTicker) { _ in
+            cacheProgress = ChapterCache.shared.progress
+        }
         .task { await load() }
     }
 
@@ -120,6 +127,26 @@ struct BookDetailView: View {
             .disabled(chapters.isEmpty)
 
             Button {
+                cacheAll()
+            } label: {
+                Image(systemName: cacheProgress.isRunning ? "stop.circle" : "arrow.down.circle")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(cacheProgress.isRunning ? Theme.Palette.warning : Theme.Palette.brand)
+                    .frame(width: 50, height: 50)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                            .fill(Theme.ColorToken.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                            .stroke(Theme.ColorToken.separator, lineWidth: 0.8)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(chapters.isEmpty)
+            .accessibilityLabel(cacheProgress.isRunning ? "停止缓存" : "缓存整本")
+
+            Button {
                 toggleShelf()
             } label: {
                 Image(systemName: isInShelf ? "checkmark.circle.fill" : "plus.circle")
@@ -137,6 +164,29 @@ struct BookDetailView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    /// 缓存整本：以书架书为单位，未加入书架时先加入
+    private func cacheAll() {
+        guard let source = sources.source(id: searchBook.origin), !chapters.isEmpty else {
+            appState.show("请先加载目录", style: .failure)
+            return
+        }
+        if cacheProgress.isRunning {
+            ChapterCache.shared.cancel()
+            appState.show("已停止缓存")
+            return
+        }
+        if !isInShelf { addToShelf() }
+        guard let book = shelf.book(id: searchBook.origin + "|" + searchBook.bookUrl) else { return }
+        ChapterCache.shared.cacheAll(
+            book: book,
+            chapters: chapters,
+            source: source,
+            variables: book.variable,
+            bookInfo: bookInfoMap(displayInfo)
+        )
+        appState.show("开始缓存整本", style: .success)
     }
 
     private var isInShelf: Bool {
