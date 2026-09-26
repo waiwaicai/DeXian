@@ -10,8 +10,8 @@ struct RssArticleView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var rss: RssStore
     @EnvironmentObject private var settings: SettingsStore
-    @Environment(.colorScheme) private var colorScheme
-    @Environment(.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openURL) private var openURL
 
     @State private var state: LoadState = .loading
     @State private var blocks: [RssBlock] = []
