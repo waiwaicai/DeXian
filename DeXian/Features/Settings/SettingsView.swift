@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var sources: SourceStore
+    @EnvironmentObject private var rss: RssStore
     @EnvironmentObject private var shelf: ShelfStore
     @EnvironmentObject private var settings: SettingsStore
 
@@ -14,6 +15,7 @@ struct SettingsView: View {
 
             List {
                 sourceSection
+                rssSection
                 readingSection
                 appearanceSection
                 aboutSection
@@ -54,6 +56,38 @@ struct SettingsView: View {
             Text("书源")
         } footer: {
             Text("支持导入阅读（Legado）格式书源，包括 yckceo 书源仓库的分享链接。")
+        }
+    }
+
+    // MARK: 订阅源
+
+    private var rssSection: some View {
+        Section {
+            NavigationLink {
+                RssSourceListView()
+            } label: {
+                settingsRow(
+                    icon: "dot.radiowaves.left.and.right",
+                    color: Theme.Palette.success,
+                    title: "订阅源管理",
+                    detail: String(rss.sources.count) + " 个 · 已启用 " + String(rss.enabledSources.count)
+                )
+            }
+
+            NavigationLink {
+                ImportRssSourceView()
+            } label: {
+                settingsRow(
+                    icon: "square.and.arrow.down.on.square",
+                    color: Theme.Palette.warning,
+                    title: "导入订阅源",
+                    detail: "支持 yckceo RSS JSON"
+                )
+            }
+        } header: {
+            Text("订阅源")
+        } footer: {
+            Text("订阅源用于订阅网站的文章与图片，支持 yckceo 的 RSS 订阅源仓库。")
         }
     }
 
