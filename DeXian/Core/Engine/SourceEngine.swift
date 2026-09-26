@@ -34,11 +34,9 @@ final class SourceEngine {
         js.key = keyword
         js.page = page
 
-        // URL 可能是 @js: 规则
-        var urlTemplate = request.url
-        if urlTemplate.hasPrefix("@js:") {
-            let value = js.evaluateString(String(urlTemplate.dropFirst(4)))
-            urlTemplate = RuleUtil.asString(value) ?? ""
+        // URL 里可能内嵌 @js / <js> 段（例：<js>if(page==1){…}</js>index.php?…）
+        let urlTemplate = RuleUtil.resolveJSSegments(request.url) { script in
+            RuleUtil.asString(js.evaluate(script)) ?? ""
         }
 
         let analyzer = makeAnalyzer(content: nil, baseUrl: source.url, js: js)
@@ -71,8 +69,8 @@ final class SourceEngine {
         let analyzer = makeAnalyzer(content: nil, baseUrl: source.url, js: js)
         analyzer.page = page
         var resolved = analyzer.interpolate(urlTemplate)
-        if resolved.hasPrefix("@js:") {
-            resolved = js.evaluateString(String(resolved.dropFirst(4)))
+        resolved = RuleUtil.resolveJSSegments(resolved) { script in
+            RuleUtil.asString(js.evaluate(script)) ?? ""
         }
 
         let parsed = HTTPClient.parseURLRule(resolved)
@@ -213,6 +211,9 @@ final class SourceEngine {
         let parsed = HTTPClient.parseURLRule(target)
         let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
 
+        // baseUrl 对齐当前页面地址，页面匹配类脚本（baseUrl.match(...)）才正确
+        js.host.baseUrl = parsed.url
+
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         var text = contentAnalyzer.string(source.contentRule.content)
 
@@ -273,6 +274,7 @@ final class SourceEngine {
 
         let parsed = HTTPClient.parseURLRule(target)
         let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
+        js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
 
         var candidates: [String] = []
@@ -319,6 +321,7 @@ final class SourceEngine {
         let parsed = HTTPClient.parseURLRule(target)
 
         let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
+        js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         var value = contentAnalyzer.string(source.contentRule.content)
         if value.isEmpty { value = content }
@@ -381,7 +384,8 @@ final class SourceEngine {
             urlString: target,
             options: options,
             sourceKey: source.cookieJar ? source.id : nil,
-            defaultHeaders: headers
+            defaultHeaders: headers,
+            base: baseForResolving(target, fallback: source.url)
         )
 
         // 登录检查
@@ -420,7 +424,8 @@ final class SourceEngine {
             urlString: parsed.url,
             options: finalOptions,
             sourceKey: source.cookieJar ? source.id : nil,
-            defaultHeaders: headers
+            defaultHeaders: headers,
+            base: baseForResolving(parsed.url, fallback: source.url)
         )
 
         if let check = source.loginCheckJs.nilIfBlank {
@@ -555,6 +560,17 @@ final class SourceEngine {
         )
     }
 
+    /// 相对地址的解析基准。
+    ///
+    /// 书源里 "/search.php?searchkey={{key}}"、"a.jpg" 这类相对写法很常见，
+    /// 目标已是绝对地址时 base 不参与计算，直接返回 nil。
+    private func baseForResolving(_ urlString: String, fallback: String) -> String? {
+        let value = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return fallback.nilIfBlank }
+        if value.hasPrefix("//") || RuleUtil.hasScheme(value) { return nil }
+        return fallback.nilIfBlank
+    }
+
     private func parseHeaders() -> [String: String] {
         let raw = source.header.trimmed
         guard !raw.isEmpty else { return [:] }
@@ -631,6 +647,13 @@ final class SourceEngine {
             }
         }
 
+        // JS 规则常返回 [{link:"..."}] 这类对象数组（包子漫画等）
+        if results.isEmpty, value.contains("{") {
+            for raw in RuleUtil.imageLinksFromJSON(value) {
+                results.append(RuleUtil.absoluteURL(raw, base: baseUrl))
+            }
+        }
+
         // 再兜底扫描裸链接
         if results.isEmpty {
             let candidates = RuleUtil.regexMatch(value, pattern: "(?:https?:)?//[^\\s\"'<>,]+?\\.(?:jpg|jpeg|png|webp|gif|bmp|avif)")
@@ -655,7 +678,7 @@ final class SourceEngine {
 }
 
 /// 章节正文结果
-struct ChapterContent {
+struct ChapterContent: Codable {
     var text: String
     var images: [String]
     var nextChapterUrl: String?
