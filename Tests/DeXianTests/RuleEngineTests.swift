@@ -539,4 +539,376 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(options.method, "POST")
         XCTAssertEqual(options.body, "{\"k\":1}")
     }
+
+    // MARK: 相对地址（unsupported URL 回归）
+
+    func testRelativeURLResolvesAgainstSourceBase() {
+        // 腐文阁 / 伪速读谷这类源写的是相对路径，缺 base 会抛 unsupported URL
+        XCTAssertEqual(
+            RuleUtil.absoluteURL("/search.php?searchkey=%E6%83%85&page=2", base: "https://m.fuwenge.com/"),
+            "https://m.fuwenge.com/search.php?searchkey=%E6%83%85&page=2"
+        )
+        XCTAssertEqual(
+            RuleUtil.absoluteURL("/modules/article/search.php", base: "https://www.sudugu.cc"),
+            "https://www.sudugu.cc/modules/article/search.php"
+        )
+        // 已经是绝对地址时 base 不参与
+        XCTAssertEqual(
+            RuleUtil.absoluteURL("https://a.test/x", base: "https://b.test/"),
+            "https://a.test/x"
+        )
+        // 协议相对地址沿用 base 的 scheme
+        XCTAssertEqual(
+            RuleUtil.absoluteURL("//cdn.test/a.jpg", base: "http://m.fuwenge.com/"),
+            "http://cdn.test/a.jpg"
+        )
+    }
+
+    // MARK: <js> 段（禁忌书屋 searchUrl 写法）
+
+    func testJSSegmentSplitting() {
+        let pieces = RuleSyntax.splitJSSegments("<js>if(page==1){x=1}</js>index.php?action=search&p={{page}}")
+        XCTAssertEqual(pieces.count, 2)
+        XCTAssertTrue(pieces[0].isJS)
+        XCTAssertTrue(pieces[1].text.hasPrefix("index.php?action=search"))
+
+        // 前后都有静态片段
+        let both = RuleSyntax.splitJSSegments("a<js>1</js>b")
+        XCTAssertEqual(both.count, 3)
+        XCTAssertFalse(both[0].isJS)
+        XCTAssertTrue(both[1].isJS)
+        XCTAssertFalse(both[2].isJS)
+    }
+
+    func testJSSegmentResolutionBuildsURL() {
+        // JS 段先执行，结果与后缀拼接
+        let url = RuleUtil.resolveJSSegments("<js>1+1</js>index.php?p=2") { _ in "2" }
+        XCTAssertEqual(url, "2index.php?p=2")
+
+        // @result 占位符承接上一段结果
+        let carried = RuleUtil.resolveJSSegments("https://a.test/<js>''</js>@result") { _ in "keep" }
+        XCTAssertEqual(carried, "keep")
+
+        // 裸 @js: 前缀整串当脚本
+        let bare = RuleUtil.resolveJSSegments("@js: 'https://b.test/x'") { _ in "https://b.test/x" }
+        XCTAssertEqual(bare, "https://b.test/x")
+
+        // 不含 JS 段时原样返回
+        XCTAssertEqual(RuleUtil.resolveJSSegments("https://a.test/x") { _ in "no" }, "https://a.test/x")
+    }
+
+    // MARK: 传统选择器（class. / tag. / id. / text.）
+
+    func testLegacySelectorDetection() {
+        XCTAssertTrue(LegacySelector.isLegacy("class.item.0@tag.a@href"))
+        XCTAssertTrue(LegacySelector.isLegacy("tag.tr[1:]"))
+        XCTAssertTrue(LegacySelector.isLegacy("id.list-chapterAll@tag.dd@tag.a"))
+        XCTAssertTrue(LegacySelector.isLegacy("text.下一页@href"))
+        XCTAssertTrue(LegacySelector.isLegacy("children[0]"))
+        // 标准 CSS 不应该被当成传统选择器
+        XCTAssertFalse(LegacySelector.isLegacy(".item .name a"))
+        XCTAssertFalse(LegacySelector.isLegacy("div.item"))
+    }
+
+    func testLegacySelectorClassAndTag() {
+        let root = document()
+        // class.item -> 3 个
+        XCTAssertEqual(LegacySelector.select("class.item", in: root).count, 3)
+        // class.item.0 -> 第 1 个
+        XCTAssertEqual(LegacySelector.select("class.item.0", in: root).first?.attribute("data-id"), "1")
+        // tag.h3 -> 3 个
+        XCTAssertEqual(LegacySelector.select("tag.h3", in: root).count, 3)
+        // id.list -> 1 个
+        XCTAssertEqual(LegacySelector.select("id.list", in: root).count, 1)
+        // 负索引 -1 取最后一个
+        XCTAssertEqual(LegacySelector.select("class.item.-1", in: root).first?.attribute("data-id"), "3")
+    }
+
+    func testLegacySelectorBracketRangeAndExclusion() {
+        let root = document()
+        // tag.a[1:] 从第 2 个开始
+        let fromSecond = LegacySelector.select("tag.a[1:]", in: root)
+        XCTAssertEqual(fromSecond.count, 1)
+        XCTAssertEqual(fromSecond.first?.normalizedText, "凡人修仙传")
+
+        // 区间 [0:2]
+        XCTAssertEqual(LegacySelector.select("class.item[0:2]", in: root).count, 2)
+        // 排除 [!1]
+        let excluded = LegacySelector.select("class.item[!1]", in: root)
+        XCTAssertEqual(excluded.count, 2)
+        XCTAssertEqual(excluded.first?.attribute("data-id"), "1")
+        XCTAssertEqual(excluded.last?.attribute("data-id"), "3")
+    }
+
+    func testLegacySelectorChainThroughAnalyzer() {
+        let analyzer = AnalyzeRule(content: html)
+        // class.item.0@tag.a@href 等价于取第一本书的链接
+        XCTAssertEqual(analyzer.string("class.item.0@tag.a@href"), "/book/1")
+        XCTAssertEqual(analyzer.stringList("class.item@tag.a@text"),
+                       ["斗破苍穹", "凡人修仙传", "雪中悍刀行"])
+        // 列表规则
+        XCTAssertEqual(analyzer.listItems("class.item").count, 3)
+    }
+
+    // MARK: JS 返回对象数组的漫画图片
+
+    func testComicImagesFromJSObjectArray() {
+        // 包子漫画的规则返回 [{link:"..."}]
+        let json = """
+        [{"link":"https://img.test/1.jpg"},{"link":"//img.test/2.jpg"}]
+        """
+        let links = RuleUtil.imageLinksFromJSON(json)
+        XCTAssertEqual(links.count, 2)
+        XCTAssertTrue(links.contains("https://img.test/1.jpg"))
+        // 其它字段名也要能识别
+        let alt = RuleUtil.imageLinksFromJSON("[{\"src\":\"https://img.test/3.webp\"}]")
+        XCTAssertEqual(alt, ["https://img.test/3.webp"])
+    }
+
+    func testComicImagesIncludeJSObjectArray() {
+        let engine = SourceEngine(source: makeSource([
+            "bookSourceName": "漫画对象数组",
+            "bookSourceUrl": "https://comic.test",
+            "bookSourceType": 2
+        ]))
+        let value = "[{\"link\":\"/img/9.jpg\"}]"
+        let images = engine.extractImages(from: value, baseUrl: "https://comic.test/ch/1")
+        XCTAssertEqual(images, ["https://comic.test/img/9.jpg"])
+    }
+
+    // MARK: 整本离线缓存
+
+    func testChapterContentIsCodable() throws {
+        let content = ChapterContent(text: "正文", images: ["https://a.test/1.jpg"], nextChapterUrl: nil)
+        let data = try JSONEncoder().encode(content)
+        let decoded = try JSONDecoder().decode(ChapterContent.self, from: data)
+        XCTAssertEqual(decoded.text, "正文")
+        XCTAssertEqual(decoded.images, ["https://a.test/1.jpg"])
+    }
+
+    @MainActor
+    func testChapterCacheStoresAndReadsBack() {
+        let cache = ChapterCache.shared
+        let bookId = "test-cache-book-" + UUID().uuidString
+        let chapterUrl = "https://comic.test/ch/" + UUID().uuidString
+        defer { cache.remove(bookId: bookId) }
+
+        XCTAssertFalse(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
+        let content = ChapterContent(text: "缓存正文", images: [], nextChapterUrl: nil)
+        cache.store(bookId: bookId, name: "缓存测试", origin: "src", chapterUrl: chapterUrl, content: content)
+
+        XCTAssertTrue(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
+        XCTAssertEqual(cache.content(bookId: bookId, chapterUrl: chapterUrl)?.text, "缓存正文")
+        XCTAssertEqual(cache.counts(bookId: bookId).cached, 1)
+
+        cache.remove(bookId: bookId)
+        XCTAssertFalse(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
+    }
+}
+
+
+// MARK: - 订阅源（RSS）
+
+final class RssTests: XCTestCase {
+
+    /// 真实 yckceo 订阅源：带规则的"中文寻星"
+    private let ruleSource = """
+    [{"articleStyle":0,"cacheFirst":false,"customOrder":0,"enableJs":true,"enabled":true,
+      "enabledCookieJar":true,"lastUpdateTime":1789948994825,"loadWithBaseUrl":true,"preload":false,
+      "ruleArticles":"table tr td","ruleLink":"a@href","rulePubDate":"text","ruleTitle":"a@text",
+      "searchUrl":"http://dtmb.saoing.com/{{key}}.htm","singleUrl":false,
+      "sortUrl":"卫星参数::/satparam.htm\n卫星强场::/changqiang/EIRP.htm",
+      "sourceComment":"搜索请写拼音","sourceIcon":"http://saoing.com/Pictuer/logo.jpg",
+      "sourceName":"中文寻星","sourceUrl":"http://saoing.com/","type":0}]
+    """
+
+    /// 真实 yckceo 订阅源：只有名字和地址的"源仓库(官方纯净)"
+    private let plainSource = """
+    [{"articleStyle":0,"customOrder":0,"enableJs":true,"enabled":true,"enabledCookieJar":true,
+      "lastUpdateTime":0,"loadWithBaseUrl":true,"singleUrl":true,"sourceGroup":"1",
+      "sourceIcon":"","sourceName":"源仓库(官方纯净)","sourceUrl":"http://yckceo.vip"}]
+    """
+
+    func testRssSourceDetectedSeparatelyFromBookSource() {
+        let result = SourceImporter.parse(text: ruleSource)
+        XCTAssertTrue(result.hasRssSources)
+        XCTAssertFalse(result.hasBookSources)
+        XCTAssertEqual(result.rssSources.count, 1)
+        XCTAssertEqual(result.rssSources.first?.name, "中文寻星")
+    }
+
+    func testPlainRssSourceIsRecognized() {
+        // articleStyle 等订阅源字段让"只有名字+地址"的条目也能被识别
+        let result = SourceImporter.parse(text: plainSource)
+        XCTAssertTrue(result.hasRssSources)
+        XCTAssertEqual(result.rssSources.first?.name, "源仓库(官方纯净)")
+        XCTAssertFalse(result.rssSources.first?.hasArticleRule ?? true)
+    }
+
+    /// 没有任何特征字段时，由导入入口的偏好决定归属
+    func testAmbiguousSourceRespectsPreference() {
+        let ambiguous = """
+        [{"sourceName":"无特征源","sourceUrl":"https://c.com"}]
+        """
+        let asBook = SourceImporter.parse(text: ambiguous)
+        XCTAssertTrue(asBook.hasBookSources)
+        XCTAssertFalse(asBook.hasRssSources)
+
+        let asRss = SourceImporter.parse(text: ambiguous, preferRss: true)
+        XCTAssertTrue(asRss.hasRssSources)
+        XCTAssertFalse(asRss.hasBookSources)
+    }
+
+    func testBookSourceNotMistakenForRss() {
+        let book = """
+        [{"bookSourceName":"测试书源","bookSourceUrl":"https://example.com",
+          "bookSourceType":0,"ruleSearch":{"bookList":".item","name":"a@text","bookUrl":"a@href"},
+          "ruleToc":{"chapterList":".list@li","chapterName":"a@text","chapterUrl":"a@href"},
+          "ruleContent":{"content":"#content@html"},"searchUrl":"/search?q={{key}}"}]
+        """
+        let result = SourceImporter.parse(text: book)
+        XCTAssertTrue(result.hasBookSources)
+        XCTAssertFalse(result.hasRssSources)
+    }
+
+    func testMixedPayloadSplitsBothKinds() {
+        let mixed = "[" + ruleSource.dropFirst().dropLast() + "]"
+        let result = SourceImporter.parse(text: mixed)
+        XCTAssertEqual(result.rssSources.count, 1)
+        XCTAssertFalse(result.hasBookSources)
+    }
+
+    func testMixedBookAndRssInOneArray() {
+        let payload = """
+        [{"bookSourceName":"书源A","bookSourceUrl":"https://a.com","searchUrl":"/s?q={{key}}",
+          "ruleSearch":{"bookList":".i"}},
+         {"sourceName":"订阅A","sourceUrl":"https://b.com","ruleArticles":".item"}]
+        """
+        let result = SourceImporter.parse(text: payload)
+        XCTAssertEqual(result.sources.count, 1)
+        XCTAssertEqual(result.rssSources.count, 1)
+        XCTAssertEqual(result.sources.first?.name, "书源A")
+        XCTAssertEqual(result.rssSources.first?.name, "订阅A")
+    }
+
+    func testRssCategoriesParsedFromSortUrl() {
+        let result = SourceImporter.parse(text: ruleSource)
+        let source = try? XCTUnwrap(result.rssSources.first)
+        XCTAssertEqual(source?.categories.count, 2)
+        XCTAssertEqual(source?.categories.first?.title, "卫星参数")
+        XCTAssertEqual(source?.categories.first?.url, "/satparam.htm")
+    }
+
+    func testRssCategoryAnchorIsStripped() {
+        let dict: [String: Any] = [
+            "sourceName": "带锚点",
+            "sourceUrl": "https://example.com",
+            "sortUrl": "卫星参数::/#google_vignette\n卫星强场::/changqiang/EIRP.htm"
+        ]
+        let source = RssSource(dict: dict)
+        XCTAssertEqual(source.categories.first?.url, "/")
+        XCTAssertEqual(source.categories.count, 2)
+    }
+
+    func testRssSearchURLPlaceholder() {
+        let dict: [String: Any] = [
+            "sourceName": "搜索源", "sourceUrl": "https://example.com",
+            "searchUrl": "https://example.com/search?q={{key}}"
+        ]
+        let source = RssSource(dict: dict)
+        XCTAssertTrue(source.hasSearch)
+    }
+
+    func testRssArticleListRuleEvaluation() {
+        let html = """
+        <table><tr><td><a href="/a.htm">文章一</a></td><td>2026-01-01</td></tr>
+        <tr><td><a href="/b.htm">文章二</a></td><td>2026-01-02</td></tr></table>
+        """
+        let source = RssSource(dict: [
+            "sourceName": "列表源", "sourceUrl": "http://example.com/",
+            "ruleArticles": "table tr td", "ruleTitle": "a@text",
+            "ruleLink": "a@href", "rulePubDate": "text"
+        ])
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let items = analyzer.listItems(source.ruleArticles)
+        XCTAssertFalse(items.isEmpty)
+        let first = items[0]
+        let itemAnalyzer = SourceEngine.makeAnalyzer(
+            content: first, baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(itemAnalyzer.string(source.ruleTitle), "文章一")
+        XCTAssertEqual(itemAnalyzer.string(source.ruleLink), "/a.htm")
+    }
+
+    func testRssArticleLinkResolvedAgainstSourceURL() {
+        XCTAssertEqual(
+            RuleUtil.absoluteURL("/a.htm", base: "http://saoing.com/"),
+            "http://saoing.com/a.htm"
+        )
+    }
+
+    func testRssSourceIsCodable() {
+        let source = RssSource(dict: [
+            "sourceName": "编码测试", "sourceUrl": "https://example.com",
+            "ruleArticles": ".item", "ruleTitle": "a@text", "ruleLink": "a@href"
+        ])
+        let data = try? JSONEncoder().encode(source)
+        XCTAssertNotNil(data)
+        let decoded = data.flatMap { try? JSONDecoder().decode(RssSource.self, from: $0) }
+        XCTAssertEqual(decoded?.name, "编码测试")
+        XCTAssertEqual(decoded?.ruleArticles, ".item")
+    }
+
+    func testRssContentRendererSplitsParagraphs() {
+        let blocks = RssContentRenderer.render(
+            html: "<div><p>第一段</p><p>第二段</p></div>",
+            baseUrl: "https://example.com"
+        )
+        let texts = blocks.compactMap { block -> String? in
+            if case .text(let value) = block { return value }
+            return nil
+        }
+        XCTAssertEqual(texts, ["第一段", "第二段"])
+    }
+
+    func testRssContentRendererCollectsImages() {
+        let blocks = RssContentRenderer.render(
+            html: "<div><p>正文</p><img data-src=\"/a.jpg\"><img src=\"b.png\"></div>",
+            baseUrl: "https://example.com/post/"
+        )
+        let images = blocks.compactMap { block -> String? in
+            if case .image(let value) = block { return value }
+            return nil
+        }
+        XCTAssertEqual(images.count, 2)
+        XCTAssertEqual(images[0], "https://example.com/a.jpg")
+        XCTAssertEqual(images[1], "https://example.com/post/b.png")
+    }
+
+    func testRssContentRendererHandlesPlainText() {
+        let blocks = RssContentRenderer.render(html: "第一行\n第二行", baseUrl: "https://example.com")
+        XCTAssertEqual(blocks.count, 2)
+    }
+
+    /// 无规则源退化为直接罗列页面链接
+    func testFallbackArticlesFromPlainHTML() {
+        let html = "<ul><li><a href=\"/x.htm\">条目一</a></li><li><a href=\"#top\">锚点</a></li></ul>"
+        let document = HTMLParser.parse(html)
+        let nodes = CSSSelector.select("a", in: document)
+        let links = nodes.compactMap { $0.attribute("href") }.filter { !$0.hasPrefix("#") }
+        XCTAssertEqual(links, ["/x.htm"])
+    }
+
+    func testRssStoreMergeKeepsUniqueIDs() {
+        let a = RssSource(dict: ["sourceName": "A", "sourceUrl": "https://a.com"])
+        let b = RssSource(dict: ["sourceName": "B", "sourceUrl": "https://b.com"])
+        let updated = RssSource(dict: ["sourceName": "A", "sourceUrl": "https://a.com",
+                                        "ruleArticles": ".new"])
+        XCTAssertEqual(a.id, updated.id)
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(updated.ruleArticles, ".new")
+    }
 }
