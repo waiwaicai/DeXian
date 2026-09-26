@@ -73,8 +73,27 @@ jobs:
             -scheme DeXian \
             -configuration Debug \
             -destination "platform=iOS Simulator,name=$DEVICE,OS=latest" \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO > /tmp/test.log 2>&1
+          TEST_RC=$?
+          echo "==> xcodebuild test 退出码：$TEST_RC"
+
+          # 把关键结果汇总到 Step Summary，方便在运行页直接看到（日志本身是懒加载的）
+          {
+            echo "## 单元测试结果"
+            echo ""
+            echo "- xcodebuild test 退出码：$TEST_RC"
+            echo "- 测试机型：$DEVICE"
+            echo ""
+            echo '```'
+            grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ test|TEST (SUCCEEDED|FAILED)|error: Compiling" /tmp/test.log 2>/dev/null | head -120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+          echo "==> 编译错误（最多 40 行）"
+          grep -n "error:" /tmp/test.log 2>/dev/null | head -40
           echo "==> 单元测试结束（不阻断出包）"
+          mkdir -p test-report
+          cp /tmp/test.log test-report/xcodebuild-test.log 2>/dev/null || true
           exit 0
 
       - name: 构建未签名 IPA
@@ -93,6 +112,16 @@ jobs:
           if [ -f Preview/ui-layout.png ]; then cp Preview/ui-layout.png artifacts/; fi
           if [ -f Preview/logo.png ]; then cp Preview/logo.png artifacts/; fi
           ls -la artifacts
+
+      - name: 上传测试报告（失败也不影响出包）
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeXian-test-report
+          path: test-report/
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
