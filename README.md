@@ -59,7 +59,7 @@
         git tag v1.0.0
         git push origin v1.0.0
 
-Workflow 运行在官方的 `macos-14` runner 上，流程是：
+Workflow 运行在官方的 `macos-15` runner 上，流程是：
 xcodegen 生成工程 → 跑单元测试（**失败不阻断出包**）→ `make_ipa.sh` 打包 → 上传产物。
 想用自己的开发者账号签名，把 `make_ipa.sh` 末尾的 `CODE_SIGNING_ALLOWED=NO` 换成 `TEAM_ID`
 并配置好证书 Secrets 即可。
@@ -251,10 +251,11 @@ JSONPath 通配/递归/切片/过滤、规则链拆分（含 XPath 谓词里的�
 后处理替换、插值、正文分段、GB18030 解码、漫画图片提取、朗读分段与语速换算，
 以及 10 种不同书源结构的导入用例。
 
-> **请注意**：本工程是在 Windows 上编写的，手上没有 macOS / Xcode 环境，
-> 因此代码只做过静态检查（括号配平、API 可用性、Swift 语法），
-> **47 个单元测试尚未真正跑过**。第一次在 Mac 或 Actions 上运行如果出现编译错误，
-> 大概率是边角处的类型推断或 API 签名问题，按报错微调即可，不影响整体结构。
+> **状态**：本工程是在 Windows 上编写的，本地没有 macOS / Xcode 环境，
+> 因此代码先在 Windows 上做静态检查，再交给 GitHub Actions 的 macOS runner 真机编译 + 跑测试。
+> 目前 47 个单元测试在 Actions 上 **全部通过**（`xcodebuild test` 退出码 0），
+> 同时产出未签名 IPA。跑测试的流程见 `scripts/run_tests.sh`，
+> 云编译的结果（含测试日志）在 Actions 运行页的 Step Summary 与 `DeXian-test-report` artifact 里。
 
 ---
 
