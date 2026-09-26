@@ -34,6 +34,11 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 xcodegen generate
 
+# 兼容较老的 Xcode：新版 xcodegen 会写 Xcode 16 的工程格式
+if [ -x "$ROOT/scripts/normalize_project.sh" ]; then
+  "$ROOT/scripts/normalize_project.sh"
+fi
+
 mkdir -p "$BUILD_DIR" "$EXPORT_DIR" "$OUTPUT_DIR"
 rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR"/*.ipa 2>/dev/null || true
 
