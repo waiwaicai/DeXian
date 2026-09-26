@@ -102,7 +102,7 @@ enum RuleUtil {
     }
 
     static func regexFirst(_ text: String, pattern: String) -> String? {
-        regexMatch(text, pattern).first
+        regexMatch(text, pattern: pattern).first
     }
 
     static func regexReplace(_ text: String, pattern: String, replacement: String) -> String {
