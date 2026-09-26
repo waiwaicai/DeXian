@@ -71,7 +71,7 @@ final class ReaderViewModel: ObservableObject {
         }
         state = .loading
         do {
-            let list = try await engine.toc(tocUrl: tocUrlForLoading(), bookInfo: bookInfoMap)
+            let list = try await engine.toc(tocUrl: tocUrlForLoading, bookInfo: bookInfoMap)
             chapters = list
             state = .loaded
             shelf.updateChapters(bookId: book.id, chapters: list)
