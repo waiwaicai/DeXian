@@ -247,9 +247,9 @@ enum RuleSyntax {
 
     /// 提取尖括号标签体（如 js 脚本块）
     static func extractTagBody(_ text: String, tag: String) -> String {
-        let open = "<" + tag + ">"
+        let openTag = "<" + tag + ">"
         let close = "</" + tag + ">"
-        if let openRange = text.range(of: open) {
+        if let openRange = text.range(of: openTag) {
             var body = String(text[openRange.upperBound...])
             if let closeRange = body.range(of: close) { body = String(body[..<closeRange.lowerBound]) }
             return body
