@@ -108,7 +108,7 @@ final class SourceEngine {
 
         // init 规则可改写内容
         var workingContent: Any = content
-        if let initRule = source.bookInfoRule.init, !initRule.isEmpty {
+        if let initRule = source.bookInfoRule.initRule, !initRule.isEmpty {
             let initAnalyzer = makeAnalyzer(content: content, baseUrl: target, js: js)
             let initValue = initAnalyzer.string(initRule)
             if !initValue.isEmpty { workingContent = initValue }
