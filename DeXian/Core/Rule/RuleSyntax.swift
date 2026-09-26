@@ -83,7 +83,7 @@ enum RuleSyntax {
             }
             // <js>...</js> 是内联 JS 段，Legado 允许它出现在规则/URL 的任意位置，
             // 例：<js>java.t2s(result)</js>
-$..list[*] 或 searchUrl 的 <js>..</js>index.php?...
+// $..list[*] 或 searchUrl 的 <js>..</js>index.php?...
             if depth == 0, quote == nil, character == "<" {
                 if let end = tagBlockEnd(characters, at: index, tag: "js") {
                     if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -274,7 +274,7 @@ $..list[*] 或 searchUrl 的 <js>..</js>index.php?...
     /// 对齐 Legado 的 splitSourceRule：JS 段与静态段各自独立求值，
     /// 前一段的结果通过 result 传给下一段。
     /// 例：<js>GetTitleDecode(result); </js>
-.search_book_data_list[*]
+/// .search_book_data_list[*]
     static func splitJSSegments(_ rule: String) -> [(isJS: Bool, text: String)] {
         guard rule.range(of: "<js>", options: [.caseInsensitive]) != nil else {
             return [(false, rule)]
