@@ -93,7 +93,36 @@ enum SourceImporter {
             }
         }
 
-        // 3. 分享文本 / NDJSON / 宽松 JSON：截取候选片段
+        // 3. 每行一个 JSON（NDJSON）：必须先于“分享文本片段截取”。
+        //    片段截取遇到第一个平衡的 {} 就会返回，会把多行 NDJSON 截成一行。
+        var lineSources: [BookSource] = []
+        var lineSkipped = 0
+        var candidateLines = 0
+        for line in trimmed.components(separatedBy: .newlines) {
+            let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.hasPrefix("{"), value.hasSuffix("}") else { continue }
+            candidateLines += 1
+            if let json = parseJSON(value) {
+                let extraction = extract(from: json)
+                if extraction.sources.isEmpty {
+                    lineSkipped += max(extraction.skipped, 1)
+                } else {
+                    lineSources.append(contentsOf: extraction.sources)
+                }
+            } else {
+                lineSkipped += 1
+            }
+        }
+        // 至少两行、且每一行都成功解析出书源，才认定为 NDJSON；
+        // 否则「首行是 JSON + 后面是说明文字」会被误判。
+        if candidateLines >= 2, lineSkipped == 0, !lineSources.isEmpty {
+            result.sources = lineSources
+            result.skipped = 0
+            result.detectedFormat = "每行一个 JSON（NDJSON）"
+            return result
+        }
+
+        // 4. 分享文本 / 宽松 JSON：截取候选片段
         for candidate in jsonCandidates(in: trimmed) {
             if let json = parseJSON(candidate) {
                 let extraction = extract(from: json)
@@ -103,34 +132,6 @@ enum SourceImporter {
                     return output
                 }
             }
-        }
-
-        // 4. 每行一个 JSON（部分工具导出格式）
-        var lineSources: [BookSource] = []
-        var lineSkipped = 0
-        var recognizedAny = false
-        for line in trimmed.components(separatedBy: .newlines) {
-            let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard value.hasPrefix("{"), value.hasSuffix("}") else { continue }
-            recognizedAny = true
-            if let json = parseJSON(value) {
-                let extraction = extract(from: json)
-                lineSources.append(contentsOf: extraction.sources)
-                lineSkipped += extraction.skipped
-            } else {
-                lineSkipped += 1
-            }
-        }
-        if !lineSources.isEmpty {
-            result.sources = lineSources
-            result.skipped = lineSkipped
-            result.detectedFormat = "每行一个 JSON（NDJSON）"
-            return result
-        }
-        if recognizedAny {
-            result.skipped = max(lineSkipped, 1)
-            result.warnings.append("识别到 JSON 行，但字段不完整")
-            return result
         }
 
         result.warnings.append("未能识别书源格式")
