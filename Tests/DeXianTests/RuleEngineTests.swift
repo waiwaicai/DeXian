@@ -488,9 +488,17 @@ final class RuleEngineTests: XCTestCase {
 
     func testJSONCandidatesAreCapped() {
         // 多个片段时只保留上限之内的数量，且长的优先
-        let text = (0..<40)
-            .map { "{\"bookSourceName\":\"s" + String($0) + "\",\"bookSourceUrl\":\"https://x" + String($0) + ".com\"}" }
-            .joined(separator: " 噪声 ")
+        // 注意：这里刻意拆成多条语句。写成一行链式表达式时，
+        // Swift 的类型检查器会报
+        // "the compiler is unable to type-check this expression in reasonable time"。
+        var pieces: [String] = []
+        pieces.reserveCapacity(40)
+        for index in 0..<40 {
+            let n = String(index)
+            let one = "{\"bookSourceName\":\"s" + n + "\",\"bookSourceUrl\":\"https://x" + n + ".com\"}"
+            pieces.append(one)
+        }
+        let text = pieces.joined(separator: " 噪声 ")
         let candidates = SourceImporter.jsonCandidates(in: text)
         XCTAssertLessThanOrEqual(candidates.count, SourceImporter.maxCandidates)
         XCTAssertFalse(candidates.isEmpty)
