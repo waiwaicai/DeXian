@@ -234,15 +234,16 @@ xcodegen 生成工程 → 跑单元测试（**失败不阻断出包**）→ `mak
             AudioSessionController.swift   朗读 / 播放统一封装
             AudioReaderView.swift     听书界面
           Sources/                    书源管理与导入（含二维码扫描）
+          Rss/                        RSS 订阅源管理、分类列表、文章阅读、搜索
           Settings/                   我的、排版设置、调试日志
           Common/                     封面、标签、空态、Toast 等通用组件
-      Tests/DeXianTests/RuleEngineTests.swift   47 个单元测试
+      Tests/DeXianTests/RuleEngineTests.swift   75 个单元测试（规则引擎 58 + RSS 订阅 17）
 
 ---
 
 ## 六、验证
 
-单元测试覆盖规则引擎的关键行为（共 47 个用例）：
+单元测试覆盖规则引擎与 RSS 的关键行为（共 75 个用例）：
 
     ./scripts/run_tests.sh
 
@@ -253,7 +254,7 @@ JSONPath 通配/递归/切片/过滤、规则链拆分（含 XPath 谓词里的�
 
 > **状态**：本工程是在 Windows 上编写的，本地没有 macOS / Xcode 环境，
 > 因此代码先在 Windows 上做静态检查，再交给 GitHub Actions 的 macOS runner 真机编译 + 跑测试。
-> 目前 47 个单元测试在 Actions 上 **全部通过**（`xcodebuild test` 退出码 0），
+> 目前 75 个单元测试在 Actions 上 **全部通过**（`xcodebuild test` 退出码 0），
 > 同时产出未签名 IPA。跑测试的流程见 `scripts/run_tests.sh`，
 > 云编译的结果（含测试日志）在 Actions 运行页的 Step Summary 与 `DeXian-test-report` artifact 里。
 
