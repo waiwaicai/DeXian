@@ -71,6 +71,15 @@ struct RuleContext {
             self.document = nil
         }
     }
+
+    /// 换掉内容、保留全部回调（JS / 变量读写），用于 JS 结果续接静态规则。
+    func replacingContent(_ newContent: Any?) -> RuleContext {
+        var context = RuleContext(content: newContent, baseUrl: baseUrl)
+        context.evaluateJS = evaluateJS
+        context.getVariable = getVariable
+        context.putVariable = putVariable
+        return context
+    }
 }
 
 /// 规则求值器。
@@ -128,26 +137,89 @@ final class AnalyzeRule {
 
     // MARK: 规则链
 
-    /// 求值单条规则（含 @ 链）。
+    /// 求值单条规则（含 @ 链与内嵌 <js> 段）。
     private func evaluateRule(_ rule: String) -> RuleValue {
         var text = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .strings([]) }
 
         let (core, replacements) = RuleSyntax.splitReplaceRule(text)
-        text = core
-
-        let segments = RuleSyntax.splitChain(text)
-        guard !segments.isEmpty else { return .strings([]) }
-
-        var value = evaluateBase(segments[0])
-        for segment in segments.dropFirst() {
-            value = applyTransform(segment, to: value)
-        }
-
+        var value = evaluateChained(core)
         if !replacements.isEmpty {
             value = .strings(applyReplacements(value.strings, replacements: replacements))
         }
         return value
+    }
+
+    /// 求值规则；内嵌 <js>…</js> 段先跑，其结果作为后续规则的输入。
+    private func evaluateChained(_ text: String) -> RuleValue {
+        let pieces = RuleSyntax.splitJSSegments(text)
+        guard pieces.count > 1 else {
+            let segments = RuleSyntax.splitChain(text)
+            guard !segments.isEmpty else { return .strings([]) }
+            var value = evaluateBase(segments[0])
+            for segment in segments.dropFirst() { value = applyTransform(segment, to: value) }
+            return value
+        }
+
+        var value = RuleValue.strings([])
+        for (isJS, piece) in pieces {
+            if isJS {
+                let result = runJS(piece, previous: value.isEmpty ? nil : value.jsValue)
+                value = .raw(result ?? "")
+            } else {
+                value = evaluateSegment(piece, previous: value)
+            }
+        }
+        return value
+    }
+
+    /// 求值一段静态规则。
+    ///
+    /// 前面没有 JS 结果时按普通规则（可能含 @ 链）求值；
+    /// 已有 JS 结果时，对齐 Legado：以该结果为内容重新起一条规则，
+    /// 例 `<js>GetList(result)</js>$.data.list[*]`。
+    private func evaluateSegment(_ piece: String, previous: RuleValue) -> RuleValue {
+        let segments = RuleSyntax.splitChain(piece)
+        guard !segments.isEmpty else { return previous }
+        if previous.isEmpty {
+            var value = evaluateBase(segments[0])
+            for segment in segments.dropFirst() { value = applyTransform(segment, to: value) }
+            return value
+        }
+        // 链式记号（@href / @text / @js: 等）直接作用在上一段结果上
+        if segments.count == 1, isTransformMarker(segments[0]) {
+            return applyTransform(segments[0], to: previous)
+        }
+        let content: Any?
+        switch previous {
+        case .nodes(let nodes): content = nodes.first
+        case .raw(let any): content = any
+        case .strings(let values): content = values.count == 1 ? values[0] : values
+        }
+        let nested = AnalyzeRule(context: context.replacingContent(content))
+        nested.page = page
+        nested.key = key
+        nested.bookVariables = bookVariables
+        nested.chapterVariables = chapterVariables
+        var value = nested.evaluateBase(segments[0])
+        for segment in segments.dropFirst() { value = nested.applyTransform(segment, to: value) }
+        return value
+    }
+
+    /// 是否是作用在上一段结果上的链式记号。
+    private func isTransformMarker(_ segment: String) -> Bool {
+        let text = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        let lowered = text.lowercased()
+        for prefix in ["js:", "@js:", "<js>", "json:", "@json:", "css:", "@css:", "xpath:", "@xpath:", "regex:", "@regex:", "attr:"] {
+            if lowered.hasPrefix(prefix) { return true }
+        }
+        switch lowered {
+        case "text", "owntext", "textnodes", "html", "outerhtml", "all": return true
+        default: break
+        }
+        // 形如 href / src / data-src 的纯属性名
+        return text.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
     }
 
     /// 列表求值：JSON 数组自动展开。
@@ -159,14 +231,8 @@ final class AnalyzeRule {
             text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
         let (core, _) = RuleSyntax.splitReplaceRule(text)
-        let segments = RuleSyntax.splitChain(core)
-        guard let first = segments.first else { return [] }
-
+        let value = evaluateChained(core)
         var items: [Any] = []
-        var value = evaluateBase(first)
-        for segment in segments.dropFirst() {
-            value = applyTransform(segment, to: value)
-        }
 
         switch value {
         case .nodes(let nodes):
@@ -244,6 +310,9 @@ final class AnalyzeRule {
             var nodes: [HTMLNode]
             if kind == .xpath {
                 nodes = XPathEngine.nodes(body, document: document)
+            } else if LegacySelector.isLegacy(body) {
+                // Legado 默认规则：class. / tag. / id. / text. / children
+                nodes = LegacySelector.select(body, in: document)
             } else {
                 nodes = CSSSelector.select(body, in: document)
             }
@@ -266,6 +335,17 @@ final class AnalyzeRule {
             let result = runJS(script, previous: value.jsValue)
             return .raw(result ?? "")
         }
+        if lowered.hasPrefix("@js:") {
+            let script = String(text.dropFirst(4))
+            let result = runJS(script, previous: value.jsValue)
+            return .raw(result ?? "")
+        }
+        if lowered.hasPrefix("<js>") {
+            let (kind, body) = RuleSyntax.detectKind(text)
+            guard kind == .javascript else { return value }
+            let result = runJS(body, previous: value.jsValue)
+            return .raw(result ?? "")
+        }
         if lowered.hasPrefix("json:") {
             let path = String(text.dropFirst(5))
             guard let json = jsonFromValue(value) else { return .strings([]) }
@@ -278,6 +358,10 @@ final class AnalyzeRule {
         if lowered.hasPrefix("css:") {
             guard let document = documentFromValue(value) else { return .strings([]) }
             return .nodes(CSSSelector.select(String(text.dropFirst(4)), in: document))
+        }
+        if LegacySelector.isLegacy(text) {
+            guard let document = documentFromValue(value) else { return .strings([]) }
+            return .nodes(LegacySelector.select(text, in: document))
         }
         if lowered.hasPrefix("xpath:") {
             guard let document = documentFromValue(value) else { return .strings([]) }

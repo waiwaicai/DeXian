@@ -81,6 +81,20 @@ enum RuleSyntax {
                 index += 1
                 continue
             }
+            // <js>...</js> 是内联 JS 段，Legado 允许它出现在规则/URL 的任意位置，
+            // 例：<js>java.t2s(result)</js>
+$..list[*] 或 searchUrl 的 <js>..</js>index.php?...
+            if depth == 0, quote == nil, character == "<" {
+                if let end = tagBlockEnd(characters, at: index, tag: "js") {
+                    if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        segments.append(current)
+                    }
+                    current = ""
+                    segments.append(String(characters[index...end]))
+                    index = end + 1
+                    continue
+                }
+            }
             if depth == 0, character == "@" {
                 let rest = String(characters[(index + 1)...])
                 if isChainSeparator(rest) {
@@ -103,6 +117,13 @@ enum RuleSyntax {
     private static func isChainSeparator(_ rest: String) -> Bool {
         guard !rest.isEmpty else { return false }
         let lowered = rest.lowercased()
+
+        // Legado 默认规则用 @ 串联每一步（class.item.0@tag.a@href），
+        // 这些前缀本身就是明显的链分隔符。
+        for prefix in ["class.", "tag.", "id.", "text.", "children"] where lowered.hasPrefix(prefix) {
+            return true
+        }
+
         let markers = ["js:", "json:", "css:", "xpath:", "regex:", "textnodes", "outerhtml",
                        "owntext", "text", "html", "attr:", "all"]
 
@@ -246,6 +267,59 @@ enum RuleSyntax {
         guard index + pattern.count <= characters.count else { return false }
         for offset in 0..<pattern.count where characters[index + offset] != pattern[offset] { return false }
         return true
+    }
+
+    /// 按 <js>…</js> 把规则拆成「静态规则 / JS 脚本」交替的片段。
+    ///
+    /// 对齐 Legado 的 splitSourceRule：JS 段与静态段各自独立求值，
+    /// 前一段的结果通过 result 传给下一段。
+    /// 例：<js>GetTitleDecode(result); </js>
+.search_book_data_list[*]
+    static func splitJSSegments(_ rule: String) -> [(isJS: Bool, text: String)] {
+        guard rule.range(of: "<js>", options: [.caseInsensitive]) != nil else {
+            return [(false, rule)]
+        }
+        var pieces: [(Bool, String)] = []
+        var cursor = rule.startIndex
+        while let open = rule.range(of: "<js>", options: [.caseInsensitive], range: cursor..<rule.endIndex),
+              let close = rule.range(of: "</js>", options: [.caseInsensitive], range: open.upperBound..<rule.endIndex) {
+            let head = String(rule[cursor..<open.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !head.isEmpty { pieces.append((false, head)) }
+            let script = String(rule[open.upperBound..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            pieces.append((true, script))
+            cursor = close.upperBound
+        }
+        let tail = String(rule[cursor...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { pieces.append((false, tail)) }
+        return pieces
+    }
+
+    /// 判断 index 处是否是 <tag>，并返回闭合标签的下标。
+    static func tagBlockEnd(_ characters: [Character], at index: Int, tag: String) -> Int? {
+        let open: [Character] = Array("<" + tag + ">")
+        guard index + open.count <= characters.count else { return nil }
+        for offset in 0..<open.count where !sameCharacter(characters[index + offset], open[offset]) {
+            return nil
+        }
+        let close: [Character] = Array("</" + tag + ">")
+        var cursor = index + open.count
+        while cursor + close.count <= characters.count {
+            var matched = true
+            for offset in 0..<close.count where !sameCharacter(characters[cursor + offset], close[offset]) {
+                matched = false
+                break
+            }
+            if matched { return cursor + close.count - 1 }
+            cursor += 1
+        }
+        return nil
+    }
+
+    /// 只对 ASCII 忽略大小写，避免整串 lowercased 在非 ASCII 大写字符上错位。
+    private static func sameCharacter(_ lhs: Character, _ rhs: Character) -> Bool {
+        if lhs == rhs { return true }
+        guard lhs.isASCII, rhs.isASCII else { return false }
+        return lhs.lowercased() == rhs.lowercased()
     }
 
     /// 提取尖括号标签体（如 js 脚本块）
