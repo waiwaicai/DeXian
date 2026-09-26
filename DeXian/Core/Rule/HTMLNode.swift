@@ -156,7 +156,8 @@ final class HTMLNode {
         var result = ""
         var lastWasSpace = false
         for scalar in text.unicodeScalars {
-            let isSpace = CharacterSet.whitespacesAndNewlines.contains(scalar)
+            // 只把 ASCII 空白当作可折叠空格：\u{00a0} / \u{3000} 等属于正文内容，必须保留
+            let isSpace = scalar.value == 0x20 || scalar.value == 0x09 || scalar.value == 0x0A || scalar.value == 0x0D
             if isSpace {
                 if !lastWasSpace && !result.isEmpty { result.append(" ") }
                 lastWasSpace = true
@@ -165,6 +166,7 @@ final class HTMLNode {
                 lastWasSpace = false
             }
         }
+        while result.hasSuffix(" ") { result.removeLast() }
         return result
     }
 
@@ -387,21 +389,55 @@ enum HTMLParser {
         return true
     }
 
-    /// 需要隐式闭合的标签：遇到同类新标签时先关闭旧的。
+    /// 隐式闭合表：key = 新遇到的标签，value = 允许被它关闭的**栈顶**标签。
+    ///
+    /// 关键约束：value 里只能出现「不可能包含 key」的标签。
+    /// 例如 <div>/<ul>/<table> 可以包含 <p>，所以它们能关闭栈顶的 <p>；
+    /// 但容器类标签绝不能出现在自己的关闭集合里，
+    /// 否则每遇一个新标签就会把祖先弹栈，整棵 DOM 树被摧毁。
     private static let implicitClose: [String: Set<String>] = [
-        "p": ["p", "div", "section", "article", "ul", "ol", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre"],
-        "li": ["li"],
-        "dt": ["dt", "dd"],
-        "dd": ["dt", "dd"],
-        "td": ["td", "th", "tr"],
-        "th": ["td", "th", "tr"],
-        "tr": ["tr"],
+        "p": ["p"],
+        "div": ["p"],
+        "section": ["p"],
+        "article": ["p"],
+        "blockquote": ["p"],
+        "pre": ["p"],
+        "ul": ["p"],
+        "ol": ["p"],
+        "table": ["p"],
+        "figure": ["p"],
+        "figcaption": ["p"],
+        "dl": ["p"],
+        "hr": ["p"],
+        "form": ["p"],
+        "fieldset": ["p"],
+        "details": ["p"],
+        "summary": ["p"],
+        "address": ["p"],
+        "center": ["p"],
+        "menu": ["p"],
+        "hgroup": ["p"],
+        "header": ["p"],
+        "footer": ["p"],
+        "nav": ["p"],
+        "aside": ["p"],
+        "main": ["p"],
+        "li": ["p", "li"],
+        "dt": ["p", "dt", "dd"],
+        "dd": ["p", "dt", "dd"],
+        "td": ["p", "td", "th"],
+        "th": ["p", "td", "th"],
+        "tr": ["p", "tr", "td", "th"],
+        "thead": ["p", "thead", "tbody", "tfoot", "tr", "td", "th"],
+        "tbody": ["p", "thead", "tbody", "tfoot", "tr", "td", "th"],
+        "tfoot": ["p", "thead", "tbody", "tfoot", "tr", "td", "th"],
         "option": ["option"],
-        "thead": ["tbody", "tfoot"],
-        "tbody": ["tbody", "tfoot"],
-        "h1": ["h1", "h2", "h3", "h4", "h5", "h6"],
-        "h2": ["h1", "h2", "h3", "h4", "h5", "h6"],
-        "h3": ["h1", "h2", "h3", "h4", "h5", "h6"]
+        "h1": ["p", "h1", "h2", "h3", "h4", "h5", "h6"],
+        "h2": ["p", "h1", "h2", "h3", "h4", "h5", "h6"],
+        "h3": ["p", "h1", "h2", "h3", "h4", "h5", "h6"],
+        "h4": ["p", "h1", "h2", "h3", "h4", "h5", "h6"],
+        "h5": ["p", "h1", "h2", "h3", "h4", "h5", "h6"],
+        "h6": ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
     ]
 
     private static func autoClose(_ tagName: String, stack: inout [HTMLNode]) {
