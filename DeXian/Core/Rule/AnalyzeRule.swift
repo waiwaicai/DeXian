@@ -304,7 +304,7 @@ final class AnalyzeRule {
 
         switch lowered {
         case "text":
-            return .strings(nodes.map { RuleUtil.cleanText($0).trimmingCharacters(in: .whitespacesAndNewlines) })
+            return .strings(nodes.map { XPathEngine.stringValue(of: $0).trimmingCharacters(in: .whitespacesAndNewlines) })
         case "owntext":
             return .strings(nodes.map { $0.ownText.trimmingCharacters(in: .whitespacesAndNewlines) })
         case "textnodes":

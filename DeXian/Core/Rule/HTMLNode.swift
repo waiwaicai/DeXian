@@ -126,7 +126,7 @@ final class HTMLNode {
         switch kind {
         case .document:
             return children.map { $0.outerHTML }.joined()
-        case .text:
+        case .text, .attribute:
             return text
         case .comment:
             return "<!--\(text)-->"

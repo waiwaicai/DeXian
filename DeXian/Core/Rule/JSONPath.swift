@@ -312,7 +312,8 @@ enum JSONPath {
         var index = 0
 
         init(expression: String, item: Any) {
-            tokens = FilterLexer(expression: expression).tokenize()
+            var lexer = FilterLexer(expression: expression)
+            tokens = lexer.tokenize()
             self.item = item
         }
 
