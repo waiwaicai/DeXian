@@ -7,6 +7,7 @@ import AudioToolbox
 struct ImportSourceView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var sources: SourceStore
+    @EnvironmentObject private var rss: RssStore
 
     @State private var urlText = ""
     @State private var isImporting = false
@@ -256,9 +257,20 @@ struct ImportSourceView: View {
 
     @MainActor
     private func handle(result: ImportResult, source: String) async {
-        guard !result.isEmpty else {
-            let reason = result.warnings.first ?? "未识别到有效书源"
-            finish(reason, style: .failure)
+        // 混有订阅源时一并入库，避免用户再导一次
+        var rssMessage = ""
+        if result.hasRssSources {
+            let mergedRss = rss.add(result.rssSources)
+            rssMessage = "订阅源 " + String(mergedRss.added) + " 个"
+        }
+
+        guard result.hasBookSources else {
+            if result.hasRssSources {
+                finish("已导入 " + rssMessage, style: .success)
+                appState.show("已导入 " + rssMessage, style: .success)
+            } else {
+                finish(result.warnings.first ?? "未识别到有效书源", style: .failure)
+            }
             return
         }
         // 合并去重也在后台完成
@@ -266,6 +278,7 @@ struct ImportSourceView: View {
         var message = "已导入 " + String(merged.added) + " 个"
         if merged.updated > 0 { message += "，更新 " + String(merged.updated) + " 个" }
         if result.skipped > 0 { message += "，跳过 " + String(result.skipped) + " 个无效条目" }
+        if !rssMessage.isEmpty { message += "；" + rssMessage }
         finish(message + "（" + result.detectedFormat + "）", style: .success)
         appState.show(message, style: .success)
     }
