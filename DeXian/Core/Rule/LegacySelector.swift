@@ -105,20 +105,37 @@ enum LegacySelector {
             case 1:
                 if let value = Int(parts[0]) { indexes.append(.single(value)) }
             case 2:
-                if let start = parts[0].isEmpty ? 0 : Int(parts[0]),
-                   let end = parts[1].isEmpty ? nil : Int(parts[1]) {
-                    indexes.append(.range(start, end, 1))
-                }
+                if let index = slice(parts[0], parts[1], step: nil) { indexes.append(index) }
             default:
-                if let start = parts[0].isEmpty ? 0 : Int(parts[0]),
-                   let end = parts[1].isEmpty ? nil : Int(parts[1]),
-                   let step = parts[2].isEmpty ? 1 : Int(parts[2]) {
-                    indexes.append(.range(start, end, step))
-                }
+                if let index = slice(parts[0], parts[1], step: parts[2]) { indexes.append(index) }
             }
         }
         return (indexes, exclusion)
     }
+
+    /// 解析切片端点：返回 (是否给出, 值)。省略端点时 given 为 false。
+    private static func boundValue(_ text: String) -> (given: Bool, value: Int)? {
+        let item = text.trimmingCharacters(in: .whitespaces)
+        if item.isEmpty { return (false, 0) }
+        guard let value = Int(item) else { return nil }
+        return (true, value)
+    }
+
+    /// 方括号切片：[start:end] / [start:end:step]，端点与步长均可省略，
+    /// 负数从末尾算起，与 Python 切片语义一致（区间为半开）。
+    private static func slice(_ startText: String, _ endText: String, step stepText: String?) -> Index? {
+        guard let start = boundValue(startText), let end = boundValue(endText) else { return nil }
+        var step = 1
+        if let stepText {
+            let item = stepText.trimmingCharacters(in: .whitespaces)
+            if !item.isEmpty {
+                guard let value = Int(item), value != 0 else { return nil }
+                step = value
+            }
+        }
+        return .range(start.given ? start.value : nil, end.given ? end.value : nil, step)
+    }
+
 
     private static func parseIndexList(_ body: String) -> [Index]? {
         var indexes: [Index] = []
@@ -219,21 +236,28 @@ enum LegacySelector {
         return value >= 0 ? value : nil
     }
 
+    /// 展开切片区间。语义与 Python / Legado 对齐：区间半开、负数从末尾算起。
     private static func expand(start: Int?, end: Int?, step: Int, count: Int) -> [Int] {
         guard count > 0 else { return [] }
-        let from = resolve(start ?? 0, count: count) ?? (start ?? 0 < 0 ? 0 : count - 1)
-        let to = resolve(end ?? (count - 1), count: count) ?? (count - 1)
-        let rawStep = step == 0 ? 1 : step
-        let magnitude = max(1, abs(rawStep) % count == 0 ? 1 : abs(rawStep))
-        if from == to { return [from] }
-        var result: [Int] = []
-        if from < to {
+        let magnitude = max(1, abs(step == 0 ? 1 : step))
+        func normalize(_ value: Int) -> Int { value < 0 ? value + count : value }
+
+        if step >= 0 {
+            let from = max(0, min(start.map(normalize) ?? 0, count))
+            let to = max(0, min(end.map(normalize) ?? count, count))
+            guard from < to else { return [] }
+            var result: [Int] = []
             var value = from
-            while value <= to { result.append(value); value += magnitude }
-        } else {
-            var value = from
-            while value >= to { result.append(value); value -= magnitude }
+            while value < to { result.append(value); value += magnitude }
+            return result
         }
+
+        let from = min(count - 1, start.map(normalize) ?? (count - 1))
+        let to = max(-1, end.map(normalize) ?? -1)
+        guard to < from else { return [] }
+        var result: [Int] = []
+        var value = from
+        while value > to { result.append(value); value -= magnitude }
         return result
     }
 
