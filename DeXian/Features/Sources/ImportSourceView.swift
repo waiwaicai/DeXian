@@ -223,7 +223,7 @@ struct ImportSourceView: View {
         }
 
         do {
-            let result = try await SourceImporter.import(from: value)
+        let result = try await SourceImporter.importFromURL(value)
             await handle(result: result, source: "链接")
         } catch {
             finish("下载失败：" + error.localizedDescription, style: .failure)
