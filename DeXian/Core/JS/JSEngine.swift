@@ -227,22 +227,16 @@ final class JSEngine {
 
         let getElement: @convention(block) (String) -> JSValue = { [weak self] rule in
             guard let self, let document = self.currentDocument() else { return JSValue(undefinedIn: context) }
-            let (kind, body) = RuleSyntax.detectKind(rule)
-            let nodes: [HTMLNode] = kind == .xpath
-                ? XPathEngine.nodes(body, document: document)
-                : CSSSelector.select(body, in: document)
-            guard let first = nodes.first else { return JSValue(undefinedIn: context) }
+            guard let first = self.selectNodes(rule, in: document).first else {
+                return JSValue(undefinedIn: context)
+            }
             return self.wrapElement(first)
         }
         java.setObject(getElement, forKeyedSubscript: "getElement" as NSString)
 
         let getElements: @convention(block) (String) -> [JSValue] = { [weak self] rule in
             guard let self, let document = self.currentDocument() else { return [] }
-            let (kind, body) = RuleSyntax.detectKind(rule)
-            let nodes: [HTMLNode] = kind == .xpath
-                ? XPathEngine.nodes(body, document: document)
-                : CSSSelector.select(body, in: document)
-            return nodes.map { self.wrapElement($0) }
+            return self.selectNodes(rule, in: document).map { self.wrapElement($0) }
         }
         java.setObject(getElements, forKeyedSubscript: "getElements" as NSString)
 
@@ -596,6 +590,17 @@ final class JSEngine {
         object.setObject(selectFirst, forKeyedSubscript: "selectFirst" as NSString)
 
         return object
+    }
+
+    /// 统一的选择入口：XPath / 传统选择器 / CSS。
+    ///
+    /// 书源脚本里 java.getElements('class.comic-contain@amp-img') 这类写法很常见，
+    /// 传统选择器必须与规则引擎走同一套求值。
+    private func selectNodes(_ rule: String, in document: HTMLNode) -> [HTMLNode] {
+        let (kind, body) = RuleSyntax.detectKind(rule)
+        if kind == .xpath { return XPathEngine.nodes(body, document: document) }
+        if LegacySelector.isLegacy(body) { return LegacySelector.select(body, in: document) }
+        return CSSSelector.select(body, in: document)
     }
 
     private func currentDocument() -> HTMLNode? {
