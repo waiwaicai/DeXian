@@ -23,8 +23,16 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: 报告 Xcode 版本
-        run: xcodebuild -version
+      - name: 选择可用的 Xcode
+        run: |
+          echo "==> 已安装的 Xcode："
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          LATEST="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$LATEST" ]; then
+            echo "==> 切换到 $LATEST"
+            sudo xcode-select -s "$LATEST"
+          fi
+          xcodebuild -version
 
       - name: 安装 xcodegen
         run: |
@@ -34,7 +42,10 @@ jobs:
           xcodegen --version
 
       - name: 生成 Xcode 工程
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          chmod +x scripts/normalize_project.sh
+          ./scripts/normalize_project.sh
 
       - name: 运行单元测试
         id: tests
