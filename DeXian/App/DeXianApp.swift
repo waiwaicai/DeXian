@@ -9,6 +9,7 @@ struct DeXianApp: App {
             RootView()
                 .environmentObject(appState)
                 .environmentObject(appState.sources)
+                .environmentObject(appState.rss)
                 .environmentObject(appState.shelf)
                 .environmentObject(appState.settings)
                 .preferredColorScheme(appState.settings.appearance.colorScheme)
@@ -24,7 +25,7 @@ struct RootView: View {
     @EnvironmentObject private var shelf: ShelfStore
 
     enum Tab: Hashable {
-        case shelf, explore, search, settings
+        case shelf, explore, rss, search, settings
     }
 
     var body: some View {
@@ -37,6 +38,10 @@ struct RootView: View {
                 NavigationStack { ExploreView() }
                     .tabItem { Label("发现", systemImage: "safari.fill") }
                     .tag(Tab.explore)
+
+                NavigationStack { RssHomeView() }
+                    .tabItem { Label("订阅", systemImage: "dot.radiowaves.left.and.right") }
+                    .tag(Tab.rss)
 
                 NavigationStack { SearchView() }
                     .tabItem { Label("搜索", systemImage: "magnifyingglass") }

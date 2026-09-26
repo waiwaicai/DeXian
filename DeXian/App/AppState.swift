@@ -5,6 +5,7 @@ import Combine
 @MainActor
 final class AppState: ObservableObject {
     let sources = SourceStore()
+    let rss = RssStore()
     let shelf = ShelfStore()
     let settings = SettingsStore()
 
