@@ -484,10 +484,6 @@ final class JSEngine {
             options.body = parsedOptions.body
         }
         for (key, value) in parsedOptions.headers { headers[key] = value }
-        if finalURL.hasPrefix("http") == false, !host.baseUrl.isEmpty {
-            options.method = options.method
-        }
-
         let resolvedURL = RuleUtil.absoluteURL(finalURL, base: host.baseUrl)
         do {
             let response = try HTTPClient.shared.requestSync(
