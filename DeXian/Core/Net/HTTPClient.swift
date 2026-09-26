@@ -50,13 +50,18 @@ final class HTTPClient {
     }
 
     /// 发起异步请求
+    ///
+    /// - Parameter base: 相对地址的解析基准。书源里大量使用
+    ///   "/search.php?searchkey={{key}}" 这类相对写法，缺少基准时
+    ///   URL(string:) 会抛 NSURLErrorUnsupportedURL(-1002)。
     func request(
         urlString: String,
         options: HTTPRequestOptions = HTTPRequestOptions(),
         sourceKey: String? = nil,
-        defaultHeaders: [String: String] = [:]
+        defaultHeaders: [String: String] = [:],
+        base: String? = nil
     ) async throws -> HTTPResponse {
-        let resolved = RuleUtil.absoluteURL(urlString, base: nil)
+        let resolved = RuleUtil.absoluteURL(urlString, base: base)
         guard let url = URL(string: resolved) else {
             throw NetworkError.invalidURL(urlString)
         }
@@ -119,8 +124,13 @@ final class HTTPClient {
     }
 
     /// 下载二进制（图片 / 音频）
-    func data(urlString: String, headers: [String: String] = [:], sourceKey: String? = nil) async throws -> Data {
-        let resolved = RuleUtil.absoluteURL(urlString, base: nil)
+    func data(
+        urlString: String,
+        headers: [String: String] = [:],
+        sourceKey: String? = nil,
+        base: String? = nil
+    ) async throws -> Data {
+        let resolved = RuleUtil.absoluteURL(urlString, base: base)
         guard let url = URL(string: resolved) else {
             throw NetworkError.invalidURL(urlString)
         }
@@ -140,7 +150,8 @@ final class HTTPClient {
         urlString: String,
         options: HTTPRequestOptions = HTTPRequestOptions(),
         sourceKey: String? = nil,
-        defaultHeaders: [String: String] = [:]
+        defaultHeaders: [String: String] = [:],
+        base: String? = nil
     ) throws -> HTTPResponse {
         let semaphore = DispatchSemaphore(value: 0)
         let box = ResponseBox()
@@ -150,7 +161,8 @@ final class HTTPClient {
                     urlString: urlString,
                     options: options,
                     sourceKey: sourceKey,
-                    defaultHeaders: defaultHeaders
+                    defaultHeaders: defaultHeaders,
+                    base: base
                 )
                 box.set(.success(response))
             } catch {
