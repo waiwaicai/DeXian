@@ -167,6 +167,66 @@ enum RuleUtil {
         return base + "/" + value
     }
 
+    /// 求值内嵌的 JS 段，对齐 Legado 的 AnalyzeUrl.analyzeJs。
+    ///
+    /// 书源里会写成 `<js>if(page==1){source.setVariable('')}</js>index.php?action=search&p={{page}}`：
+    /// JS 段先执行，其返回值与后面的静态片段拼接成最终地址；
+    /// 片段里的 `@result` 是上一段结果的占位符。
+    /// 只有 `@js:` 前缀（没有闭合标签）时，整条规则都当作脚本。
+    static func resolveJSSegments(_ rule: String, evaluate: (String) -> String) -> String {
+        guard rule.contains("<js>") || rule.contains("<JS>") || rule.contains("@js:") else { return rule }
+        let text = rule
+        // 裸 @js: 前缀：整串都是脚本
+        if let range = text.range(of: "@js:", options: [.caseInsensitive]),
+           text[..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return evaluate(String(text[range.upperBound...]))
+        }
+
+        var result = text
+        var cursor = text.startIndex
+        while let open = text.range(of: "<js>", options: [.caseInsensitive], range: cursor..<text.endIndex),
+              let close = text.range(of: "</js>", options: [.caseInsensitive], range: open.upperBound..<text.endIndex) {
+            let script = String(text[open.upperBound..<close.lowerBound])
+            let prefix = String(text[cursor..<open.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !prefix.isEmpty { result = prefix.replacingOccurrences(of: "@result", with: result) }
+            result = evaluate(script)
+            cursor = close.upperBound
+        }
+        let tail = String(text[cursor...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { result = tail.replacingOccurrences(of: "@result", with: result) }
+        return result
+    }
+
+    /// 从 JS 返回的 JSON 里抽取图片地址。
+    ///
+    /// 漫画源的正文规则常用 java.getElements(...) 组装出
+    /// [{"link":"https://..."}] 这样的对象数组，属性名不固定。
+    static func imageLinksFromJSON(_ text: String) -> [String] {
+        guard let json = text.jsonObject else { return [] }
+        var results: [String] = []
+        let keys = ["link", "src", "url", "image", "img", "data-src", "dataSrc", "original"]
+
+        func visit(_ value: Any) {
+            if let dictionary = value as? [String: Any] {
+                for key in keys {
+                    if let raw = dictionary[key], let url = asString(raw), !url.isEmpty {
+                        results.append(url)
+                        return
+                    }
+                }
+                for (_, nested) in dictionary { visit(nested) }
+                return
+            }
+            if let array = value as? [Any] {
+                for nested in array { visit(nested) }
+                return
+            }
+        }
+
+        visit(json)
+        return results
+    }
+
     static func hasScheme(_ value: String) -> Bool {
         guard let colon = value.firstIndex(of: ":") else { return false }
         let scheme = String(value[..<colon])
