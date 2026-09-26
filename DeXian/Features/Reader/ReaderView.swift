@@ -170,6 +170,7 @@ struct ReaderView: View {
         VStack(spacing: 0) {
             topBar
             Spacer()
+            cacheProgressBar
             bottomBar
         }
         .transition(.opacity)
@@ -199,6 +200,31 @@ struct ReaderView: View {
         .padding(.horizontal, Theme.Spacing.page)
         .padding(.vertical, Theme.Spacing.md)
         .background(.ultraThinMaterial)
+    }
+
+    /// 整本缓存进度条：下载中才出现
+    private var cacheProgressBar: some View {
+        Group {
+            if viewModel.cacheProgress.total > 0 {
+                VStack(spacing: Theme.Spacing.xs) {
+                    ProgressView(value: viewModel.cacheProgress.fraction)
+                        .progressViewStyle(.linear)
+                        .tint(Theme.Palette.brand)
+                    HStack {
+                        Text(viewModel.cacheProgress.isRunning ? "正在缓存整本" : "缓存完成")
+                            .font(.themeTiny)
+                            .foregroundStyle(Theme.ColorToken.textSecondary)
+                        Spacer()
+                        Text(viewModel.cacheProgress.text)
+                            .font(.themeTiny)
+                            .foregroundStyle(Theme.ColorToken.textSecondary)
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.page)
+                .padding(.vertical, Theme.Spacing.sm)
+                .background(.ultraThinMaterial)
+            }
+        }
     }
 
     private var bottomBar: some View {
@@ -274,6 +300,20 @@ struct ReaderView: View {
                     } label: {
                         Label(audioMode ? "退出听书" : "听书", systemImage: audioMode ? "book" : "headphones")
                     }
+                }
+
+                Button {
+                    viewModel.cacheAll()
+                } label: {
+                    Label(viewModel.cacheAllText,
+                          systemImage: viewModel.isCachingAll ? "stop.circle" : "arrow.down.circle")
+                }
+                .disabled(viewModel.chapters.isEmpty || viewModel.isAudio)
+
+                if viewModel.cachedChapterCount > 0 {
+                    Button(role: .destructive) {
+                        viewModel.clearCache()
+                    } label: { Label("清理离线缓存", systemImage: "trash") }
                 }
 
                 Button {

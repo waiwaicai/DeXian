@@ -20,6 +20,10 @@ final class ReaderViewModel: ObservableObject {
     @Published var currentIndex: Int = 0
     @Published private(set) var state: LoadState = .idle
     @Published private(set) var isLoadingContent = false
+    /// 整本离线缓存进度
+    @Published private(set) var cacheProgress = ChapterCache.Progress()
+    /// 本地已缓存章节数（用于界面提示）
+    @Published private(set) var cachedChapterCount = 0
 
     let book: ShelfBook
     /// 书源缺失时为 nil，界面会提示换源
@@ -27,6 +31,7 @@ final class ReaderViewModel: ObservableObject {
     private let shelf: ShelfStore
     private var contentCache: [String: ChapterContent] = [:]
     private var loadTask: Task<Void, Never>?
+    private var cacheObserver: AnyCancellable?
 
     init(book: ShelfBook, source: BookSource?, shelf: ShelfStore) {
         self.book = book
@@ -34,6 +39,15 @@ final class ReaderViewModel: ObservableObject {
         engine = source.map { SourceEngine(source: $0, variables: book.variable) }
         chapters = book.chapters
         currentIndex = book.lastReadChapterIndex
+        cachedChapterCount = ChapterCache.shared.counts(bookId: book.id).cached
+        // 缓存由单例驱动，进度变化时同步到界面
+        cacheObserver = ChapterCache.shared.$progress
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                guard let self else { return }
+                self.cacheProgress = value
+                self.cachedChapterCount = ChapterCache.shared.counts(bookId: self.book.id).cached
+            }
     }
 
     var hasSource: Bool { engine != nil }
@@ -128,6 +142,15 @@ final class ReaderViewModel: ObservableObject {
             return
         }
 
+        // 离线缓存优先：断网也能读
+        if let offline = ChapterCache.shared.content(bookId: book.id, chapterUrl: chapter.url) {
+            contentCache[chapter.url] = offline
+            content = offline.text
+            images = offline.images
+            state = .loaded
+            return
+        }
+
         loadTask?.cancel()
         isLoadingContent = true
         content = ""
@@ -163,6 +186,13 @@ final class ReaderViewModel: ObservableObject {
                 self.content = result.text
                 self.images = result.images
                 self.state = .loaded
+                ChapterCache.shared.store(
+                    bookId: self.book.id,
+                    name: self.book.name,
+                    origin: self.book.origin,
+                    chapterUrl: chapter.url,
+                    content: result
+                )
                 self.isLoadingContent = false
                 self.shelf.updateVariables(bookId: self.book.id, variables: engine.variableSnapshot)
                 self.shelf.updateProgress(
@@ -234,6 +264,53 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: 整本离线缓存
+
+    /// 是否正在下载整本
+    var isCachingAll: Bool { cacheProgress.isRunning }
+
+    /// 正在下载整本时按钮上的进度文案
+    var cacheAllText: String {
+        if cacheProgress.isRunning {
+            return "缓存中 " + cacheProgress.text
+        }
+        return cachedChapterCount > 0
+            ? "已缓存 " + String(cachedChapterCount) + "/" + String(chapters.count)
+            : "缓存整本"
+    }
+
+    /// 下载整本（已缓存的章节自动跳过）
+    func cacheAll() {
+        guard let engine else {
+            state = .failed("书源缺失，无法缓存")
+            return
+        }
+        if cacheProgress.isRunning {
+            ChapterCache.shared.cancel()
+            return
+        }
+        ChapterCache.shared.onVariableChange = { [weak self] snapshot in
+            guard let self else { return }
+            self.shelf.updateVariables(bookId: self.book.id, variables: snapshot)
+        }
+        ChapterCache.shared.cacheAll(
+            book: book,
+            chapters: chapters,
+            source: engine.source,
+            variables: engine.variableSnapshot,
+            bookInfo: bookInfoMap
+        )
+    }
+
+    /// 清理这本书的离线缓存
+    func clearCache() {
+        ChapterCache.shared.cancel()
+        ChapterCache.shared.remove(bookId: book.id)
+        contentCache.removeAll()
+        cachedChapterCount = 0
+        cacheProgress = ChapterCache.Progress()
     }
 
     func goNext() async {
