@@ -167,7 +167,7 @@ enum SourceImporter {
     }
 
     /// 从网络地址导入（支持重定向与纯文本）
-    static func import(from urlString: String) async throws -> ImportResult {
+    static func importFromURL(_ urlString: String) async throws -> ImportResult {
         let response = try await HTTPClient.shared.request(urlString: urlString, options: HTTPRequestOptions())
         var result = parse(text: response.text)
         if result.isEmpty {
@@ -184,7 +184,7 @@ enum SourceImporter {
     }
 
     /// 读取本文件（JSON / txt）
-    static func import(fromFile url: URL) -> ImportResult {
+    static func importFromFile(_ url: URL) -> ImportResult {
         guard let data = try? Data(contentsOf: url) else {
             var result = ImportResult()
             result.warnings.append("文件读取失败")
