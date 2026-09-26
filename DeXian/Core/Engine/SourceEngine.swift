@@ -577,7 +577,7 @@ final class SourceEngine {
         var result = text
 
         // 应用书源自定义的正文替换规则（Legado 的 替换净化）
-        if let replaceRule = source.contentRule.replaceRegex.nilIfBlank {
+        if let replaceRule = source.contentRule.replaceRegex?.nilIfBlank {
             for rule in RuleSyntax.splitTopLevel(replaceRule, separator: "\n") {
                 // 支持 "正则##替换" 与 "正则" 两种写法
                 if let range = rule.range(of: "##") {
