@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 struct ImportRssSourceView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var rss: RssStore
-    @Environment(.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismiss
 
     @State private var urlText = ""
     @State private var isImporting = false
