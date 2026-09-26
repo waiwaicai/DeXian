@@ -81,10 +81,17 @@ schemes:
         DeXianTests: [test]
     run:
       config: Debug
+    # 关键：test 段必须显式列出 test target，否则 xcodegen 生成的 scheme
+    # 不会把 DeXianTests 挂进 Test action，xcodebuild test 会直接报
+    # "Scheme DeXian is not currently configured for the test action"。
     test:
       config: Debug
       gatherCoverageData: false
+      targets:
+        - DeXianTests
     profile:
       config: Release
+    analyze:
+      config: Debug
     archive:
       config: Release
