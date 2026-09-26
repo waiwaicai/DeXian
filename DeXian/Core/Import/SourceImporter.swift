@@ -3,6 +3,8 @@ import Foundation
 /// 书源导入结果
 struct ImportResult {
     var sources: [BookSource] = []
+    /// 识别到的订阅源（RSS）。与书源分开存放，字段结构不同。
+    var rssSources: [RssSource] = []
     var skipped: Int = 0
     var warnings: [String] = []
     /// 识别到的格式，用于界面提示
@@ -10,7 +12,9 @@ struct ImportResult {
     /// 结构被识别（但可能没有有效条目），用于区分"不是书源"与"书源字段不全"
     var recognized: Bool = false
 
-    var isEmpty: Bool { sources.isEmpty }
+    var isEmpty: Bool { sources.isEmpty && rssSources.isEmpty }
+    var hasBookSources: Bool { !sources.isEmpty }
+    var hasRssSources: Bool { !rssSources.isEmpty }
 }
 
 /// 多结构书源导入器。
@@ -57,7 +61,7 @@ enum SourceImporter {
     ///
     /// 本方法不依赖任何共享可变状态，可以在后台线程安全调用
     /// （界面请使用 parseInBackground，避免大文件解析阻塞主线程）。
-    static func parse(text: String) -> ImportResult {
+    static func parse(text: String, preferRss: Bool = false) -> ImportResult {
         var result = ImportResult()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -75,7 +79,7 @@ enum SourceImporter {
 
         // 1. Base64
         if looksLikeBase64(trimmed), let decoded = decodeBase64(trimmed) {
-            let inner = parse(text: decoded)
+            let inner = parse(text: decoded, preferRss: preferRss)
             if !inner.isEmpty {
                 var merged = inner
                 merged.detectedFormat = "Base64 编码的 " + inner.detectedFormat
@@ -85,8 +89,8 @@ enum SourceImporter {
 
         // 2. 直接当作 JSON
         if let json = parseJSON(trimmed) {
-            let extraction = extract(from: json)
-            if !extraction.sources.isEmpty || extraction.recognized {
+            let extraction = extract(from: json, preferRss: preferRss)
+            if !extraction.isEmpty || extraction.recognized {
                 var output = extraction
                 if output.detectedFormat == "未知" { output.detectedFormat = "JSON 数组" }
                 return output
@@ -96,6 +100,7 @@ enum SourceImporter {
         // 3. 每行一个 JSON（NDJSON）：必须先于“分享文本片段截取”。
         //    片段截取遇到第一个平衡的 {} 就会返回，会把多行 NDJSON 截成一行。
         var lineSources: [BookSource] = []
+        var lineRssSources: [RssSource] = []
         var lineSkipped = 0
         var candidateLines = 0
         for line in trimmed.components(separatedBy: .newlines) {
@@ -103,11 +108,12 @@ enum SourceImporter {
             guard value.hasPrefix("{"), value.hasSuffix("}") else { continue }
             candidateLines += 1
             if let json = parseJSON(value) {
-                let extraction = extract(from: json)
-                if extraction.sources.isEmpty {
+                let extraction = extract(from: json, preferRss: preferRss)
+                if extraction.isEmpty {
                     lineSkipped += max(extraction.skipped, 1)
                 } else {
                     lineSources.append(contentsOf: extraction.sources)
+                    lineRssSources.append(contentsOf: extraction.rssSources)
                 }
             } else {
                 lineSkipped += 1
@@ -115,8 +121,9 @@ enum SourceImporter {
         }
         // 至少两行、且每一行都成功解析出书源，才认定为 NDJSON；
         // 否则「首行是 JSON + 后面是说明文字」会被误判。
-        if candidateLines >= 2, lineSkipped == 0, !lineSources.isEmpty {
+        if candidateLines >= 2, lineSkipped == 0, !lineSources.isEmpty || !lineRssSources.isEmpty {
             result.sources = lineSources
+            result.rssSources = lineRssSources
             result.skipped = 0
             result.detectedFormat = "每行一个 JSON（NDJSON）"
             return result
@@ -125,8 +132,8 @@ enum SourceImporter {
         // 4. 分享文本 / 宽松 JSON：截取候选片段
         for candidate in jsonCandidates(in: trimmed) {
             if let json = parseJSON(candidate) {
-                let extraction = extract(from: json)
-                if !extraction.sources.isEmpty {
+                let extraction = extract(from: json, preferRss: preferRss)
+                if !extraction.isEmpty {
                     var output = extraction
                     if output.detectedFormat == "未知" { output.detectedFormat = "分享文本中的 JSON" }
                     return output
@@ -139,12 +146,12 @@ enum SourceImporter {
     }
 
     /// 在后台线程解析，供界面使用（大文件不会卡住主线程）。
-    static func parseInBackground(text: String) async -> ImportResult {
-        await Background.run { parse(text: text) }
+    static func parseInBackground(text: String, preferRss: Bool = false) async -> ImportResult {
+        await Background.run { parse(text: text, preferRss: preferRss) }
     }
 
     /// 后台读取并解析文件（含体积预检，避免一次性读入超大文件）
-    static func importInBackground(fromFile url: URL) async -> ImportResult {
+    static func importInBackground(fromFile url: URL, preferRss: Bool = false) async -> ImportResult {
         // 先看文件大小，超限就不读了
         if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
            size > maxTextBytes {
@@ -168,14 +175,14 @@ enum SourceImporter {
     }
 
     /// 从网络地址导入（支持重定向与纯文本）
-    static func importFromURL(_ urlString: String) async throws -> ImportResult {
+    static func importFromURL(_ urlString: String, preferRss: Bool = false) async throws -> ImportResult {
         let response = try await HTTPClient.shared.request(urlString: urlString, options: HTTPRequestOptions())
-        var result = parse(text: response.text)
+        var result = parse(text: response.text, preferRss: preferRss)
         if result.isEmpty {
             // 有些链接直接指向文件，尝试用最终 URL 再取一次
             if let finalURL = response.finalURL?.absoluteString, finalURL != urlString {
                 let retry = try await HTTPClient.shared.request(urlString: finalURL, options: HTTPRequestOptions())
-                result = parse(text: retry.text)
+                result = parse(text: retry.text, preferRss: preferRss)
             }
         }
         if !result.isEmpty {
@@ -185,7 +192,7 @@ enum SourceImporter {
     }
 
     /// 读取本文件（JSON / txt）
-    static func importFromFile(_ url: URL) -> ImportResult {
+    static func importFromFile(_ url: URL, preferRss: Bool = false) -> ImportResult {
         guard let data = try? Data(contentsOf: url) else {
             var result = ImportResult()
             result.warnings.append("文件读取失败")
@@ -197,20 +204,32 @@ enum SourceImporter {
     // MARK: 结构提取
 
     /// 从任意 JSON 结构中提取书源列表，兼容各种包装。
-    private static func extract(from json: Any) -> ImportResult {
+    private static func extract(from json: Any, preferRss: Bool = false) -> ImportResult {
         var result = ImportResult()
 
         // 单对象
         if let dictionary = json as? [String: Any] {
-            if isSourceLike(dictionary) {
+            switch kindOf(dictionary, preferRss: preferRss) {
+            case .book:
                 if let source = makeSource(dictionary) {
                     result.sources = [source]
                     result.detectedFormat = "单个书源对象"
                 } else {
                     result.skipped = 1
+                    result.recognized = true
                 }
-                result.detectedFormat = "单个书源对象"
                 return result
+            case .rss:
+                if let source = makeRssSource(dictionary) {
+                    result.rssSources = [source]
+                    result.detectedFormat = "单个订阅源对象"
+                } else {
+                    result.skipped = 1
+                }
+                result.recognized = true
+                return result
+            case .none:
+                break
             }
 
             // 包装字段
@@ -220,7 +239,7 @@ enum SourceImporter {
             for key in wrapperKeys {
                 guard let value = dictionary[key] else { continue }
                 sawWrapper = true
-                let inner = extract(from: value)
+                let inner = extract(from: value, preferRss: preferRss)
                 if !inner.isEmpty { return inner }
             }
             if sawWrapper { result.recognized = true }
@@ -228,18 +247,27 @@ enum SourceImporter {
             // 书源名 -> 书源 的映射形式
             if let mapping = dictionary as? [String: Any], mapping.count > 0 {
                 var sources: [BookSource] = []
+                var rssSources: [RssSource] = []
                 var skipped = 0
                 for (name, value) in mapping {
                     guard let item = value as? [String: Any] else { continue }
                     var mutable = item
                     if mutable["bookSourceName"] == nil { mutable["bookSourceName"] = name }
-                    if let source = makeSource(mutable) { sources.append(source) } else { skipped += 1 }
+                    switch kindOf(mutable, preferRss: preferRss) {
+                    case .book:
+                        if let source = makeSource(mutable) { sources.append(source) } else { skipped += 1 }
+                    case .rss:
+                        if let source = makeRssSource(mutable) { rssSources.append(source) } else { skipped += 1 }
+                    case .none:
+                        skipped += 1
+                    }
                 }
-                if !sources.isEmpty {
+                if !sources.isEmpty || !rssSources.isEmpty {
                     result.sources = sources
+                    result.rssSources = rssSources
                     result.skipped = skipped
                     result.recognized = true
-                    result.detectedFormat = "书源名到书源的映射"
+                    result.detectedFormat = "名称到源对象的映射"
                     return result
                 }
             }
@@ -249,24 +277,39 @@ enum SourceImporter {
         // 数组
         if let array = json as? [Any] {
             var sources: [BookSource] = []
+            var rssSources: [RssSource] = []
             var skipped = 0
             for item in array {
-                if let dictionary = item as? [String: Any] {
-                    if let source = makeSource(dictionary) { sources.append(source) } else { skipped += 1 }
+                var dictionary: [String: Any]?
+                if let value = item as? [String: Any] {
+                    dictionary = value
                 } else if let text = item as? String {
                     // 数组里放 JSON 字符串
-                    if let nested = text.jsonObject as? [String: Any], let source = makeSource(nested) {
-                        sources.append(source)
-                    } else {
-                        skipped += 1
-                    }
-                } else {
+                    dictionary = text.jsonObject as? [String: Any]
+                }
+                guard let entry = dictionary else { skipped += 1; continue }
+                switch kindOf(entry, preferRss: preferRss) {
+                case .book:
+                    if let source = makeSource(entry) { sources.append(source) } else { skipped += 1 }
+                case .rss:
+                    if let source = makeRssSource(entry) { rssSources.append(source) } else { skipped += 1 }
+                case .none:
                     skipped += 1
                 }
             }
             result.sources = sources
+            result.rssSources = rssSources
             result.skipped = skipped
             result.recognized = true
+            if !rssSources.isEmpty && sources.isEmpty {
+                result.detectedFormat = "JSON 数组（" + String(rssSources.count) + " 个订阅源）"
+                return result
+            }
+            if !rssSources.isEmpty {
+                result.detectedFormat = "JSON 数组（" + String(sources.count) + " 个书源 + "
+                    + String(rssSources.count) + " 个订阅源）"
+                return result
+            }
             result.detectedFormat = "JSON 数组（" + String(sources.count) + " 个书源）"
             if sources.isEmpty, !array.isEmpty {
                 result.warnings.append("数组里的条目缺少书源字段")
@@ -276,20 +319,52 @@ enum SourceImporter {
 
         // 纯字符串（可能是内层 JSON）
         if let text = json as? String {
-            return parse(text: text)
+            return parse(text: text, preferRss: preferRss)
         }
         return result
     }
 
-    /// 判断字典是否像一个书源
-    private static func isSourceLike(_ dictionary: [String: Any]) -> Bool {
-        let markers = ["bookSourceUrl", "bookSourceName", "bookSourceType", "ruleSearch",
-                       "ruleToc", "ruleContent", "searchUrl", "exploreUrl", "sourceUrl"]
-        for marker in markers where dictionary[marker] != nil { return true }
-        // 至少要同时有名和地址才当作书源
-        let hasName = dictionary["bookSourceName"] != nil || dictionary["name"] != nil
-        let hasURL = dictionary["bookSourceUrl"] != nil || dictionary["url"] != nil
-        return hasName && hasURL
+    /// 条目类型：书源 / 订阅源 / 无法识别
+    enum SourceKind {
+        case book
+        case rss
+        case none
+    }
+
+    /// 判断一个条目是书源还是订阅源。
+    ///
+    /// 两者字段名高度重合（都有 name/url/enabled），靠"独有字段"区分：
+    /// - 书源独有：bookSourceName / ruleSearch / ruleToc / exploreUrl
+    /// - 订阅源独有：ruleArticles / ruleTitle / ruleLink / articleStyle / sortUrl
+    /// 只有 ruleContent 时优先当作订阅源（书源的正文规则在 ruleContent.content 下）。
+    static func kindOf(_ dictionary: [String: Any], preferRss: Bool = false) -> SourceKind {
+        if dictionary["bookSourceName"] != nil || dictionary["bookSourceUrl"] != nil { return .book }
+        if dictionary["ruleSearch"] != nil || dictionary["ruleToc"] != nil
+            || dictionary["ruleBookInfo"] != nil || dictionary["exploreUrl"] != nil {
+            return .book
+        }
+        if dictionary["ruleArticles"] != nil || dictionary["ruleTitle"] != nil
+            || dictionary["ruleLink"] != nil || dictionary["rulePubDate"] != nil
+            || dictionary["articleStyle"] != nil {
+            return .rss
+        }
+        if dictionary["sortUrl"] != nil { return .rss }
+        // articleStyle / loadWithBaseUrl / singleUrl 是订阅源字段，书源不使用，
+        // 因此哪怕没有任何规则也能判定为订阅源（例：源仓库官方纯净）。
+        if dictionary["articleStyle"] != nil { return .rss }
+        if dictionary["loadWithBaseUrl"] != nil && dictionary["bookSourceType"] == nil { return .rss }
+
+        let hasName = dictionary["sourceName"] != nil || dictionary["name"] != nil
+            || dictionary["bookSourceName"] != nil || dictionary["title"] != nil
+        let hasURL = dictionary["sourceUrl"] != nil || dictionary["url"] != nil
+            || dictionary["bookSourceUrl"] != nil
+        guard hasName, hasURL else { return .none }
+        // 有正文规则但没有任何书籍结构时，按订阅源处理
+        if dictionary["ruleContent"] != nil { return .rss }
+        // 名字里带"订阅"的按订阅源处理
+        let name = dictionary.str("sourceName", "name", "title") ?? ""
+        if name.contains("订阅") { return .rss }
+        return .book
     }
 
     static func makeSource(_ dictionary: [String: Any]) -> BookSource? {
@@ -298,6 +373,16 @@ enum SourceImporter {
         // 名和地址都没有 => 不是书源
         if name.isBlank && url.isBlank { return nil }
         return BookSource(dict: dictionary)
+    }
+
+    static func makeRssSource(_ dictionary: [String: Any]) -> RssSource? {
+        let name = dictionary.str("sourceName", "name", "title") ?? ""
+        let url = dictionary.str("sourceUrl", "url", "baseUrl", "host") ?? ""
+        // 订阅源至少要能定位到内容：有地址，或有搜索地址
+        let search = dictionary.str("searchUrl") ?? ""
+        if url.isBlank && search.isBlank { return nil }
+        if name.isBlank && url.isBlank { return nil }
+        return RssSource(dict: dictionary)
     }
 
     // MARK: JSON 容错解析
