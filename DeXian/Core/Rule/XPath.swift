@@ -155,8 +155,6 @@ enum XPathToken: Equatable {
     case greaterOrEqual
     case and
     case or
-    case div
-    case mod
 }
 
 struct XPathTokenizer {
@@ -267,13 +265,9 @@ struct XPathTokenizer {
             value.append(characters[index])
             index += 1
         }
-        switch value.lowercased() {
-        case "and": return .and
-        case "or": return .or
-        case "div": return .div
-        case "mod": return .mod
-        default: return .name(value)
-        }
+        // 一律产出 .name：and / or / div / mod 也可能是元素名（例如 //div），
+        // 交给语法分析按出现位置决定它到底是名字还是运算符。
+        return .name(value)
     }
 }
 
@@ -403,7 +397,7 @@ struct XPathParser {
 
     private mutating func parseOr() -> XPathExpression {
         var left = parseAnd()
-        while match(.or) {
+        while consumeOperatorName("or") {
             let right = parseAnd()
             left = .or(left, right)
         }
@@ -412,7 +406,7 @@ struct XPathParser {
 
     private mutating func parseAnd() -> XPathExpression {
         var left = parseEquality()
-        while match(.and) {
+        while consumeOperatorName("and") {
             let right = parseEquality()
             left = .and(left, right)
         }
@@ -463,8 +457,8 @@ struct XPathParser {
             let op: String
             switch token {
             case .star: op = "*"
-            case .div: op = "div"
-            case .mod: op = "mod"
+            case .name(let value) where value.lowercased() == "div": op = "div"
+            case .name(let value) where value.lowercased() == "mod": op = "mod"
             default: return left
             }
             index += 1
@@ -542,6 +536,19 @@ struct XPathParser {
     private func peek(_ offset: Int) -> XPathToken? {
         let target = index + offset
         return target < tokens.count ? tokens[target] : nil
+    }
+
+    /// 运算符名称（and / or / div / mod）与元素名共用词法，
+    /// 只有在表达式位置出现时才按运算符消费。
+    private func isOperatorName(_ token: XPathToken?, _ keyword: String) -> Bool {
+        guard let token, case .name(let value) = token else { return false }
+        return value.lowercased() == keyword
+    }
+
+    private mutating func consumeOperatorName(_ keyword: String) -> Bool {
+        guard isOperatorName(current, keyword) else { return false }
+        index += 1
+        return true
     }
 
     /// LocationPath 的步序列。
