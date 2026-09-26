@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build:
     name: Build unsigned IPA
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
 
     steps:
@@ -48,15 +48,17 @@ jobs:
           ./scripts/normalize_project.sh
 
       - name: 运行单元测试
-        id: tests
         continue-on-error: true
         run: |
+          DEVICE="$(xcrun simctl list devices available | grep -m1 -o 'iPhone [0-9A-Za-z ]*' | sed 's/[[:space:]]*$//' || true)"
+          if [ -z "$DEVICE" ]; then DEVICE="iPhone 16"; fi
+          echo "==> 测试机型：$DEVICE"
           set -o pipefail
           xcodebuild test \
             -project DeXian.xcodeproj \
             -scheme DeXian \
             -configuration Debug \
-            -destination "platform=iOS Simulator,name=iPhone 15,OS=latest" \
+            -destination "platform=iOS Simulator,name=$DEVICE,OS=latest" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: 构建未签名 IPA
