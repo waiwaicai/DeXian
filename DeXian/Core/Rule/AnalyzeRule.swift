@@ -360,6 +360,18 @@ final class AnalyzeRule {
             return .nodes(CSSSelector.select(String(text.dropFirst(4)), in: document))
         }
         if LegacySelector.isLegacy(text) {
+            // 节点集合上继续套选择器：对每个节点分别求值再拼接结果
+            // （例：class.item@tag.a@text 需要得到全部 3 个书名，而不是只取第一个）
+            if case .nodes(let nodes) = value, nodes.count > 1 {
+                var combined: [HTMLNode] = []
+                var seen = Set<ObjectIdentifier>()
+                for node in nodes {
+                    for found in LegacySelector.select(text, in: node) {
+                        if seen.insert(ObjectIdentifier(found)).inserted { combined.append(found) }
+                    }
+                }
+                return .nodes(combined)
+            }
             guard let document = documentFromValue(value) else { return .strings([]) }
             return .nodes(LegacySelector.select(text, in: document))
         }
