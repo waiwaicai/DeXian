@@ -107,6 +107,9 @@ enum RuleSyntax {
                        "owntext", "text", "html", "attr:", "all"]
 
         for marker in markers where lowered.hasPrefix(marker) {
+            // 带冒号的标志（js: / json: / css: / attr:）后面直接跟脚本或路径，
+            // 一定是链分隔符，不能再要求后续字符不是标识符。
+            if marker.hasSuffix(":") { return true }
             let remainder = lowered.dropFirst(marker.count)
             if remainder.isEmpty { return true }
             if let first = remainder.first, !isIdentifierCharacter(first) { return true }
