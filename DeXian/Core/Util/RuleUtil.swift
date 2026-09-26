@@ -193,7 +193,16 @@ enum RuleUtil {
             cursor = close.upperBound
         }
         let tail = String(text[cursor...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if !tail.isEmpty { result = tail.replacingOccurrences(of: "@result", with: result) }
+        if !tail.isEmpty {
+            // 有 @result 时用它承接上一段结果（对齐 Legado）；
+            // 没有 @result 时把 JS 段的返回值直接接在后缀前面，
+            // 例：<js>1+1</js>index.php?p=2 -> "2index.php?p=2"
+            if tail.contains("@result") {
+                result = tail.replacingOccurrences(of: "@result", with: result)
+            } else {
+                result += tail
+            }
+        }
         return result
     }
 
