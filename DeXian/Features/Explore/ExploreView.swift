@@ -219,7 +219,7 @@ final class ExploreViewModel: ObservableObject {
             }
             errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = SourceError.describe(error)
             isFinished = true
         }
     }
