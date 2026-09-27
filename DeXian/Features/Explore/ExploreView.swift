@@ -225,9 +225,9 @@ final class ExploreViewModel: ObservableObject {
                 isFinished = true
             }
             if reset {
-                books = result
+                books = dedupe(result)
             } else {
-                books.append(contentsOf: result)
+                books = dedupe(books + result)
             }
             errorMessage = nil
         } catch {
@@ -237,6 +237,19 @@ final class ExploreViewModel: ObservableObject {
     }
 
     private var category: ExploreCategory? { currentCategory }
+
+    /// 结果去重。
+    ///
+    /// 书源分页偶尔会重复返回同一本书，SwiftUI 的 ForEach 遇到重复 id
+    /// 会直接 fatalError 崩溃，所以入列表前必须去重。
+    private func dedupe(_ list: [SearchBook]) -> [SearchBook] {
+        var seen = Set<String>()
+        var output: [SearchBook] = []
+        for book in list where seen.insert(book.id).inserted {
+            output.append(book)
+        }
+        return output
+    }
 
     /// 解析发现分类（JSON 数组 / 单行 "标题::地址"）
     private func parseCategories(_ raw: String) -> [ExploreCategory] {
