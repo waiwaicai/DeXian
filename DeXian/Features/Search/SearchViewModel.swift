@@ -29,6 +29,13 @@ final class SearchViewModel: ObservableObject {
 
     private var searchTask: Task<Void, Never>?
 
+    /// 同时抓取的书源数量上限。
+    ///
+    /// 书源动辄几百个：如果每个源都立刻起一个任务，就会同时创建几百个
+    /// JSVirtualMachine（每个源一个），内存瞬间飙升被系统强杀。
+    /// 压到 6 个既不会给系统压力，整体速度也几乎不受影响。
+    private let concurrentLimit = 6
+
     var totalCount: Int {
         results.reduce(0) { $0 + $1.books.count }
     }
@@ -55,8 +62,15 @@ final class SearchViewModel: ObservableObject {
 
         searchTask = Task { [weak self] in
             guard let self else { return }
+            let limit = self.concurrentLimit
+            let total = candidates.count
             await withTaskGroup(of: (String, Result<[SearchBook], Error>).self) { group in
-                for source in candidates {
+                // 滑动窗口：最多 limit 个源同时抓取，完成一个再补一个，
+                // 避免几百个源同时建 JSVirtualMachine 把内存打爆。
+                var next = 0
+                while next < min(limit, total) {
+                    let source = candidates[next]
+                    next += 1
                     group.addTask {
                         let engine = SourceEngine(source: source)
                         do {
@@ -68,8 +82,24 @@ final class SearchViewModel: ObservableObject {
                     }
                 }
                 for await (sourceId, outcome) in group {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        break
+                    }
                     self.apply(sourceId: sourceId, outcome: outcome)
+                    if next < total {
+                        let source = candidates[next]
+                        next += 1
+                        group.addTask {
+                            let engine = SourceEngine(source: source)
+                            do {
+                                let books = try await engine.search(keyword: value, page: page)
+                                return (source.id, .success(books))
+                            } catch {
+                                return (source.id, .failure(error))
+                            }
+                        }
+                    }
                 }
             }
             self.isSearching = false
@@ -97,12 +127,17 @@ final class SearchViewModel: ObservableObject {
 
     private func filtered(_ sources: [BookSource]) -> [BookSource] {
         let list = sources.filter { $0.enabled && !$0.searchUrl.trimmed.isEmpty }
+        let scoped: [BookSource]
         switch scope {
-        case .all: return list
-        case .text: return list.filter { $0.type == .text }
-        case .comic: return list.filter { $0.type == .image }
-        case .audio: return list.filter { $0.type == .audio }
+        case .all: scoped = list
+        case .text: scoped = list.filter { $0.type == .text }
+        case .comic: scoped = list.filter { $0.type == .image }
+        case .audio: scoped = list.filter { $0.type == .audio }
         }
+        // 按书源 id 去重：占位结果与 ForEach 都用 sourceId 当 id，
+        // 一旦重复，SwiftUI 会以 "Fatal error: Duplicate ID" 直接终止进程。
+        var seen = Set<String>()
+        return scoped.filter { seen.insert($0.id).inserted }
     }
 
     /// 结果按书源分组展示
