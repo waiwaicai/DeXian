@@ -740,11 +740,11 @@ final class SourceEngine {
         value = RuleUtil.regexReplace(value, pattern: "(?i)<!--.*?-->", replacement: "")
         value = RuleUtil.regexReplace(value, pattern: "(?i)<!doctype[^>]*>", replacement: "")
         // 块级边界还原成换行，段落才不会粘成一行
-        value = RuleUtil.regexReplace(value, pattern: "(?i)<\\s*br\\s*/?\\s*>", replacement: "\\n")
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<\\s*br\\s*/?\\s*>", replacement: "\n")
         value = RuleUtil.regexReplace(
             value,
             pattern: "(?i)</?\\s*(p|div|li|h[1-6]|tr|section|article|blockquote|dd|dt|ul|ol|table|figure|pre)\\b[^>]*>",
-            replacement: "\\n"
+            replacement: "\n"
         )
         // 剩下所有标签剥掉
         value = RuleUtil.regexReplace(value, pattern: "(?i)<[^>]+>", replacement: "")
