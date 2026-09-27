@@ -40,6 +40,20 @@ final class JSEngine {
     var result: Any?
     var src: String = ""
 
+    /// 每个引擎一个虚拟机，但**必须能被释放**。
+    ///
+    /// 之前这里存在一个强引用环：注册给 JS 的每个 block 都强捕获了
+    /// JSContext，而这些 block 又存在同一个 JSContext 的全局对象上
+    /// （java / source / cache …），于是
+    /// `JSContext → java → block → JSContext` 自锁，JSContext 永不释放，
+    /// 连带它持有的 JSVirtualMachine 也永不释放。
+    /// 搜索每跑一个书源就泄漏一整个虚拟机，搜到近百个源时
+    /// JavaScriptCore 内存分配失败走 CRASH() → abort，
+    /// 表现为 SIGABRT、调用栈全是 JavaScriptCore 帧，
+    /// 且稳定地「搜到某个数量就闪退」。
+    /// 现在所有 block 一律 [weak context] 捕获，环被打断，
+    /// 引擎随书源任务结束即时释放（在飞的最多 concurrentLimit 个）。
+
     init(host: Host = Host()) {
         self.host = host
         context = JSContext(virtualMachine: JSVirtualMachine())
@@ -93,23 +107,34 @@ final class JSEngine {
         defer { lock.unlock() }
         guard let context else { return nil }
 
-        context.setObject(key, forKeyedSubscript: "key" as NSString)
-        context.setObject(page, forKeyedSubscript: "page" as NSString)
-        context.setObject(host.baseUrl, forKeyedSubscript: "baseUrl" as NSString)
-        context.setObject(src, forKeyedSubscript: "src" as NSString)
-        context.setObject(host.title, forKeyedSubscript: "title" as NSString)
-        if let result {
-            context.setObject(result, forKeyedSubscript: "result" as NSString)
-        }
+        // 每次求值都在独立的 autorelease pool 里跑。
+        //
+        // JavaScriptCore 的 JSValue / 异常对象都是 autorelease 的 Objective-C 对象：
+        // 一次搜索要跑上百个书源、每个源评估几十条规则，产生的临时对象以万计。
+        // Swift 并发任务跑在协作线程池上，**不自带 autorelease pool**，
+        // 这些临时对象会一直挂在线程上直到线程被回收 ——
+        // 表现就是搜索越跑内存越高，到某个固定数量后进程被系统一次性清掉。
+        // 求值返回值经 swiftValue 已转成纯 Swift 类型（String / Int64 / Array / Dictionary），
+        // 不依赖 pool 存活，因此在池内返回是安全的。
+        return autoreleasepool {
+            context.setObject(key, forKeyedSubscript: "key" as NSString)
+            context.setObject(page, forKeyedSubscript: "page" as NSString)
+            context.setObject(host.baseUrl, forKeyedSubscript: "baseUrl" as NSString)
+            context.setObject(src, forKeyedSubscript: "src" as NSString)
+            context.setObject(host.title, forKeyedSubscript: "title" as NSString)
+            if let result {
+                context.setObject(result, forKeyedSubscript: "result" as NSString)
+            }
 
-        let value = context.evaluateScript(script)
-        if let exception = context.exception {
-            let message = exception.toString() ?? ""
-            Log.debugLog("JS", "异常: " + message + " | 脚本: " + String(script.prefix(160)))
-            context.exception = nil
-            return nil
+            let value = context.evaluateScript(script)
+            if let exception = context.exception {
+                let message = exception.toString() ?? ""
+                Log.debugLog("JS", "异常: " + message + " | 脚本: " + String(script.prefix(160)))
+                context.exception = nil
+                return nil
+            }
+            return JSEngine.swiftValue(value)
         }
-        return JSEngine.swiftValue(value)
     }
 
     func evaluateString(_ script: String) -> String {
@@ -148,9 +173,9 @@ final class JSEngine {
     }
 
     private func setupJava(_ context: JSContext) {
-        let java = JSValue(newObjectIn: context)!
+        let java = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
 
-        let connect: @convention(block) (JSValue) -> JSValue = { [weak self] urlValue in
+        let connect: @convention(block) (JSValue) -> JSValue = { [weak self, weak context] urlValue in
             guard let self else { return JSValue(undefinedIn: context) }
             return self.connect(url: JSEngine.stringFrom(urlValue), header: nil, method: nil, body: nil)
         }
@@ -163,13 +188,13 @@ final class JSEngine {
         }
         java.setObject(ajax, forKeyedSubscript: "ajax" as NSString)
 
-        let get: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlValue, headerValue in
+        let get: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self, weak context] urlValue, headerValue in
             guard let self else { return JSValue(undefinedIn: context) }
             return self.connect(url: JSEngine.stringFrom(urlValue), header: headerValue, method: "GET", body: nil)
         }
         java.setObject(get, forKeyedSubscript: "get" as NSString)
 
-        let post: @convention(block) (JSValue, JSValue, JSValue) -> JSValue = { [weak self] urlValue, bodyValue, headerValue in
+        let post: @convention(block) (JSValue, JSValue, JSValue) -> JSValue = { [weak self, weak context] urlValue, bodyValue, headerValue in
             guard let self else { return JSValue(undefinedIn: context) }
             return self.connect(url: JSEngine.stringFrom(urlValue),
                                 header: headerValue,
@@ -283,7 +308,7 @@ final class JSEngine {
         }
         java.setObject(setContent, forKeyedSubscript: "setContent" as NSString)
 
-        let getElement: @convention(block) (String) -> JSValue = { [weak self] rule in
+        let getElement: @convention(block) (String) -> JSValue = { [weak self, weak context] rule in
             guard let self, let document = self.currentDocument() else { return JSValue(undefinedIn: context) }
             guard let first = self.selectNodes(rule, in: document).first else {
                 return JSValue(undefinedIn: context)
@@ -317,7 +342,7 @@ final class JSEngine {
         }
         java.setObject(timeFormat, forKeyedSubscript: "timeFormat" as NSString)
 
-        let queryTTF: @convention(block) (JSValue) -> JSValue = { _ in
+        let queryTTF: @convention(block) (JSValue) -> JSValue = { [weak context] _ in
             JSValue(undefinedIn: context)
         }
         java.setObject(queryTTF, forKeyedSubscript: "queryTTF" as NSString)
@@ -335,7 +360,7 @@ final class JSEngine {
     }
 
     private func setupSource(_ context: JSContext) {
-        let source = JSValue(newObjectIn: context)!
+        let source = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
 
         let getKey: @convention(block) () -> String = { [weak self] in self?.host.sourceKey ?? "" }
         source.setObject(getKey, forKeyedSubscript: "getKey" as NSString)
@@ -403,7 +428,7 @@ final class JSEngine {
     }
 
     private func setupBookChapter(_ context: JSContext) {
-        let book = JSValue(newObjectIn: context)!
+        let book = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
         for key in ["name", "author", "bookUrl", "tocUrl", "origin", "originName", "coverUrl", "intro", "kind"] {
             book.setObject(host.bookInfo[key] ?? "", forKeyedSubscript: key as NSString)
         }
@@ -412,7 +437,7 @@ final class JSEngine {
         }
         context.setObject(book, forKeyedSubscript: "book" as NSString)
 
-        let chapter = JSValue(newObjectIn: context)!
+        let chapter = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
         chapter.setObject("", forKeyedSubscript: "title" as NSString)
         chapter.setObject("", forKeyedSubscript: "url" as NSString)
         chapter.setObject("", forKeyedSubscript: "baseUrl" as NSString)
@@ -425,7 +450,7 @@ final class JSEngine {
     }
 
     private func setupCookie(_ context: JSContext) {
-        let cookie = JSValue(newObjectIn: context)!
+        let cookie = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
 
         let getCookie: @convention(block) (String) -> String = { [weak self] urlString in
             guard let self, let url = URL(string: urlString) else { return "" }
@@ -469,7 +494,7 @@ final class JSEngine {
     }
 
     private func setupCache(_ context: JSContext) {
-        let cacheObject = JSValue(newObjectIn: context)!
+        let cacheObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
 
         let get: @convention(block) (String) -> String? = { [weak self] name in self?.cache[name] }
         cacheObject.setObject(get, forKeyedSubscript: "get" as NSString)
@@ -547,7 +572,7 @@ final class JSEngine {
             return makeResponseObject(response, context: context)
         } catch {
             Log.debugLog("JS", "请求失败: " + error.localizedDescription + " url=" + resolvedURL)
-            let object = JSValue(newObjectIn: context)!
+            let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
             object.setObject("", forKeyedSubscript: "body" as NSString)
             object.setObject("", forKeyedSubscript: "__text" as NSString)
             object.setObject(0, forKeyedSubscript: "code" as NSString)
@@ -556,7 +581,7 @@ final class JSEngine {
     }
 
     private func makeResponseObject(_ response: HTTPResponse, context: JSContext) -> JSValue {
-        let object = JSValue(newObjectIn: context)!
+        let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
         let text = response.text
         let headerMap = response.headers
         let statusCode = response.statusCode
@@ -584,10 +609,12 @@ final class JSEngine {
         let allHeaders: @convention(block) () -> [String: String] = { headerMap }
         object.setObject(allHeaders, forKeyedSubscript: "headers" as NSString)
 
-        let raw: @convention(block) () -> JSValue = {
-            let rawObject = JSValue(newObjectIn: context)!
-            let request: @convention(block) () -> JSValue = {
-                let requestObject = JSValue(newObjectIn: context)!
+        let raw: @convention(block) () -> JSValue = { [weak context] in
+            guard let context else { return JSValue(undefinedIn: nil) }
+            let rawObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+            let request: @convention(block) () -> JSValue = { [weak context] in
+                guard let context else { return JSValue(undefinedIn: nil) }
+                let requestObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
                 let urlFunction: @convention(block) () -> String = { finalURL }
                 requestObject.setObject(urlFunction, forKeyedSubscript: "url" as NSString)
                 let headerFunction: @convention(block) (String) -> String = { name in
@@ -610,7 +637,7 @@ final class JSEngine {
 
     private func wrapElement(_ node: HTMLNode) -> JSValue {
         guard let context else { return JSValue(undefinedIn: nil) }
-        let object = JSValue(newObjectIn: context)!
+        let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
 
         let text: @convention(block) () -> String = { node.normalizedText }
         object.setObject(text, forKeyedSubscript: "text" as NSString)
@@ -639,7 +666,7 @@ final class JSEngine {
         }
         object.setObject(select, forKeyedSubscript: "select" as NSString)
 
-        let selectFirst: @convention(block) (String) -> JSValue = { [weak self] rule in
+        let selectFirst: @convention(block) (String) -> JSValue = { [weak self, weak context] rule in
             guard let self, let first = CSSSelector.select(rule, in: node).first else {
                 return JSValue(undefinedIn: context)
             }
@@ -694,8 +721,25 @@ final class JSEngine {
         return text.jsonObject as? [String: Any]
     }
 
+    /// 单个数组桥接的元素上限。
+    ///
+    /// 这条路径是「JS 返回值 → Swift 值」的唯一出口。书源里的递归通配规则
+    /// 作用在 MB 级 JSON 上时，JS 侧会给出十万级元素的数组；
+    /// 逐元素桥接会一次性申请巨量内存（每个元素都要建 JSValue 再转 Swift），
+    /// 内存不够时进程被系统清掉。真实规则只需要前若干条，这里截断即可。
+    private static let maxBridgeCount = 5_000
+
+    /// 桥接深度上限：自引用对象（JS 里很常见）会让递归无上限展开直到栈溢出。
+    private static let maxBridgeDepth = 32
+
     static func swiftValue(_ value: JSValue?) -> Any? {
+        swiftValue(value, depth: 0)
+    }
+
+    private static func swiftValue(_ value: JSValue?, depth: Int) -> Any? {
         guard let value, !value.isUndefined, !value.isNull else { return nil }
+        // 自引用结构：到深度上限直接放弃展开，返回字符串表示，避免无限递归。
+        guard depth < maxBridgeDepth else { return stringFrom(value) }
         if value.isString { return value.toString() }
         if value.isBoolean { return value.toBool() }
         if value.isNumber {
@@ -705,7 +749,16 @@ final class JSEngine {
         }
         if value.isArray {
             let array = value.toArray() ?? []
-            return array.map { swiftValue(JSValue(object: $0, in: value.context)) }
+            let limited = array.count > maxBridgeCount ? Array(array.prefix(maxBridgeCount)) : array
+            // value.context 可能为 nil（对象已随引擎释放）。
+            // 原写法把 nil 直接传给 JSValue(object:in:)，属于未定义行为；
+            // 这里没有上下文时退回字符串化，绝不构造非法 JSValue。
+            guard let context = value.context else {
+                // 没有上下文就无法构造 JSValue，退回原值的字符串表示，
+                // 既保住了内容，也不会触发未定义行为。
+                return limited.map { String(describing: $0) }
+            }
+            return limited.map { swiftValue(JSValue(object: $0, in: context), depth: depth + 1) }
         }
         if value.isObject {
             if let object = value.toObject(), JSONSerialization.isValidJSONObject(object) { return object }
