@@ -78,15 +78,12 @@ enum CrashReporter {
         let file = FileStorage.url(reportName)
         descriptor = open(file.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
 
-        NSSetUncaughtExceptionHandler { exception in
-            // 这里仍是普通上下文，可以自由使用 Foundation。
-            var text = "未捕获异常: " + exception.name.rawValue
-            text += newline() + "原因: " + (exception.reason ?? "(无)")
-            text += newline() + newline() + "崩溃前日志:" + newline() + mirroredLog()
-            text += newline() + newline() + "调用栈:" + newline()
-            text += exception.callStackSymbols.joined(separator: newline())
-            CrashReporter.append(text)
-        }
+        // 必须传「文件级函数」而不是内联闭包：
+        // 这个参数的形参是 C 函数指针（@convention(c)），
+        // 内联闭包里引用 CrashReporter 的静态成员会被判定成捕获上下文，
+        // 直接编译失败：
+        // "a C function pointer cannot be formed from a closure that captures context"
+        NSSetUncaughtExceptionHandler(dexianHandleUncaughtException)
 
         for number in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
             signal(number, handleSignal)
@@ -131,11 +128,11 @@ enum CrashReporter {
 
     // MARK: 普通上下文辅助
 
-    private static func newline() -> String {
+    fileprivate static func newline() -> String {
         "\n"
     }
 
-    private static func loadReport() -> String? {
+    fileprivate static func loadReport() -> String? {
         guard let text = try? String(contentsOf: FileStorage.url(reportName), encoding: .utf8) else {
             return nil
         }
@@ -160,7 +157,7 @@ enum CrashReporter {
         lastReport = text
     }
 
-    private static func mirroredLog() -> String {
+    fileprivate static func mirroredLog() -> String {
         guard logUsed > 0 else { return "(无)" }
         let bytes = UnsafeBufferPointer(start: logBuffer, count: logUsed)
         let text = String(decoding: bytes, as: UTF8.self)
@@ -168,7 +165,7 @@ enum CrashReporter {
     }
 
     /// 普通上下文里补写内容（未捕获异常用）。
-    private static func append(_ text: String) {
+    fileprivate static func append(_ text: String) {
         guard descriptor >= 0 else { return }
         writeAll(text)
     }
@@ -248,4 +245,23 @@ enum CrashReporter {
         raise(number)
         _exit(128 + number)
     }
+}
+
+/// 未捕获异常处理器。
+///
+/// 特意放在文件作用域而不是写在 `install()` 里：
+/// `NSSetUncaughtExceptionHandler` 要的是 C 函数指针，
+/// 只有真正的顶层函数才能形成指针；写成闭包即使不引用任何局部变量，
+/// 只要引用了 `CrashReporter` 的静态成员就会被 Swift 判定为捕获上下文。
+///
+/// 这里仍是普通上下文（不是信号处理器），可以自由使用 Foundation。
+private func dexianHandleUncaughtException(_ exception: NSException) {
+    var text = "未捕获异常: " + exception.name.rawValue
+    text += CrashReporter.newline() + "原因: " + (exception.reason ?? "(无)")
+    text += CrashReporter.newline() + CrashReporter.newline()
+    text += "崩溃前日志:" + CrashReporter.newline() + CrashReporter.mirroredLog()
+    text += CrashReporter.newline() + CrashReporter.newline()
+    text += "调用栈:" + CrashReporter.newline()
+    text += exception.callStackSymbols.joined(separator: CrashReporter.newline())
+    CrashReporter.append(text)
 }
