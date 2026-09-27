@@ -21,7 +21,9 @@ struct ShelfView: View {
         ZStack {
             Theme.ColorToken.background.ignoresSafeArea()
 
-            if shelf.books.isEmpty {
+            if !shelf.isLoaded {
+                VStack { Spacer(); LoadingView(text: "正在加载书架"); Spacer() }
+            } else if shelf.books.isEmpty {
                 EmptyStateView(
                     systemImage: "books.vertical",
                     title: "书架还空着",
