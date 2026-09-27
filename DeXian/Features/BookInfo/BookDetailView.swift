@@ -55,7 +55,19 @@ struct BookDetailView: View {
         .onReceive(cacheTicker) { _ in
             cacheProgress = ChapterCache.shared.progress
         }
-        .task { await load() }
+        .task {
+            // 缓存状态依赖内存里的 meta，进页面时先读一次（后台线程），
+            // 否则「已缓存 N 章」永远显示 0。
+            if let book = shelf.book(
+                origin: searchBook.origin,
+                bookUrl: searchBook.bookUrl,
+                name: searchBook.name,
+                author: searchBook.author
+            ) {
+                await ChapterCache.shared.loadMeta(bookId: book.id)
+            }
+            await load()
+        }
     }
 
     private var displayInfo: BookInfo {
@@ -184,13 +196,18 @@ struct BookDetailView: View {
             name: displayInfo.name,
             author: displayInfo.author
         ) else { return }
-        ChapterCache.shared.cacheAll(
-            book: book,
-            chapters: chapters,
-            source: source,
-            variables: book.variable,
-            bookInfo: bookInfoMap(displayInfo)
-        )
+        // isCached 现在只读内存里的 meta：必须先把它读进来，
+        // 否则「已缓存」全被判成未缓存，点一次缓存整本会把整本书重下一遍。
+        Task {
+            await ChapterCache.shared.loadMeta(bookId: book.id)
+            ChapterCache.shared.cacheAll(
+                book: book,
+                chapters: chapters,
+                source: source,
+                variables: book.variable,
+                bookInfo: bookInfoMap(displayInfo)
+            )
+        }
         appState.show("开始缓存整本", style: .success)
     }
 
