@@ -56,23 +56,46 @@ final class SearchViewModel: ObservableObject {
     }
 
     /// 给单个操作加超时：超时后按失败处理，不会让源永远停在「加载中」。
-    /// 之前某些源会卡在加载中一直不返回，是「等久了就闪退」的直接原因。
+    ///
+    /// 刻意不用 withTaskGroup：任务组在返回前必须等所有子任务结束，
+    /// 而某些书源的 JS 会阻塞在同步网络回调里（java.ajax / startBrowserAwait），
+    /// 取消并不能把它打断。结果是超时已经把界面标成失败，滑动窗口却仍卡在
+    /// 这个源上，后面的源永远轮不到 —— 表现就是「一直加载中，等久了闪退」。
+    /// 这里改成「谁先到就用谁」：超时后立即返回，让落后的任务自己在后台收尾。
     nonisolated private static func withTimeout(
         _ seconds: TimeInterval,
         operation: @escaping @Sendable () async -> Result<[SearchBook], Error>
     ) async -> Result<[SearchBook], Error> {
-        await withTaskGroup(of: Optional<Result<[SearchBook], Error>>.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
+        let box = ContinuationBox<Result<[SearchBook], Error>>()
+        let limit = max(1, seconds)
+
+        // ContinuationBox.take() 本身就是「只成功一次」的原子闸门：
+        // 完成 / 超时 / 取消三条路径都只是抢着 take()，谁拿到谁负责恢复，
+        // 因此不存在「既没恢复也没人恢复」的窗口（那会让新的一次搜索永久挂住）。
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                box.set(continuation)
+                // 本轮已被取消（例如用户输完就点了新的搜索）：
+                // 立即收尾，否则 continuation 永不恢复，整轮搜索卡死。
+                if Task.isCancelled {
+                    box.take()?.resume(returning: .failure(NetworkError.timeout))
+                    return
+                }
+                let work = Task {
+                    let outcome = await operation()
+                    box.take()?.resume(returning: outcome)
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+                    if let pending = box.take() {
+                        // 是我们抢到了超时：顺手取消还在跑的任务
+                        work.cancel()
+                        pending.resume(returning: .failure(NetworkError.timeout))
+                    }
+                }
             }
-            // 先返回的那个为准：要么是抓取结果，要么是超时（nil）
-            for await first in group {
-                group.cancelAll()
-                return first ?? .failure(NetworkError.timeout)
-            }
-            return .failure(NetworkError.timeout)
+        } onCancel: {
+            box.take()?.resume(returning: .failure(NetworkError.timeout))
         }
     }
 
@@ -203,5 +226,32 @@ final class SearchViewModel: ObservableObject {
     /// 结果按书源分组展示
     var groupedResults: [SourceResult] {
         results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }
+    }
+}
+
+/// 存放超时竞速用的 continuation。
+///
+/// 超时、任务完成、外部取消三条路径会同时抢着恢复它，
+/// 必须保证「只恢复一次」且任何路径都能拿到它。
+final class ContinuationBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+
+    func set(_ value: CheckedContinuation<T, Never>) {
+        lock.lock()
+        continuation = value
+        lock.unlock()
+    }
+
+    /// 取走（并清空）continuation。
+    ///
+    /// 这是唯一的原子闸门：完成 / 超时 / 取消三条路径都只是抢着 take()，
+    /// 只有第一个能拿到非 nil，因此绝不会重复恢复，也不会没人恢复。
+    func take() -> CheckedContinuation<T, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = continuation
+        continuation = nil
+        return value
     }
 }
