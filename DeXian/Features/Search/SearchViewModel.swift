@@ -36,9 +36,45 @@ final class SearchViewModel: ObservableObject {
     /// 10 个既能跑满网络，JSVM 数量也远低于危险线。
     private let concurrentLimit = 5
 
-    /// 单轮搜索的总时限：超过后不再启动新的书源任务，
-    /// 已在跑的任务继续跑完。避免几百个失效源把一轮搜索拖到十几分钟。
-    private let searchDeadline: TimeInterval = 60
+    /// 单个书源的抓取上限。
+    ///
+    /// 原先是「整轮 60 秒」的全局死线：几百个源排队跑，60 秒一到，
+    /// 还没轮到启动的源会被统一标记成「已跳过（搜索超时）」。
+    /// 用户看到的就是「全部都超时」，其实绝大多数源根本没被搜过。
+    /// 改成按源计时，并把整轮窗口按源数量放大，每个源都有机会真正跑一次。
+    ///
+    /// 取值必须高于「单次 HTTP 请求的上限」（HTTPClient 里是 30s，
+    /// fetchContent 还会把它抬到至少 30s）。若设得比请求超时还短，
+    /// 那些「慢但能用」的源会被这里提前掐断，又变成假的「全部超时」。
+    /// 40s 只用来兜住真正卡死的源（脚本死循环、回调挂起）。
+    private let perSourceTimeout: TimeInterval = 40
+
+    /// 整轮搜索的上限：按「源数量 / 并发数 × 单源上限」估算，再留一倍余量。
+    private func deadline(for total: Int) -> TimeInterval {
+        let wave = Double(total) / Double(concurrentLimit)
+        return min(max(90, wave * perSourceTimeout * 2), 600)
+    }
+
+    /// 给单个操作加超时：超时后按失败处理，不会让源永远停在「加载中」。
+    /// 之前某些源会卡在加载中一直不返回，是「等久了就闪退」的直接原因。
+    nonisolated private static func withTimeout(
+        _ seconds: TimeInterval,
+        operation: @escaping @Sendable () async -> Result<[SearchBook], Error>
+    ) async -> Result<[SearchBook], Error> {
+        await withTaskGroup(of: Optional<Result<[SearchBook], Error>>.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            // 先返回的那个为准：要么是抓取结果，要么是超时（nil）
+            for await first in group {
+                group.cancelAll()
+                return first ?? .failure(NetworkError.timeout)
+            }
+            return .failure(NetworkError.timeout)
+        }
+    }
 
     var totalCount: Int {
         results.reduce(0) { $0 + $1.books.count }
@@ -64,12 +100,14 @@ final class SearchViewModel: ObservableObject {
                          books: [], error: nil, isLoading: true)
         }
 
+        let perSource = perSourceTimeout
         searchTask = Task { [weak self] in
             guard let self else { return }
             let limit = self.concurrentLimit
             let total = candidates.count
             let started = Date()
-            func outOfTime() -> Bool { Date().timeIntervalSince(started) > self.searchDeadline }
+            let timeLimit = self.deadline(for: total)
+            func outOfTime() -> Bool { Date().timeIntervalSince(started) > timeLimit }
             await withTaskGroup(of: (String, Result<[SearchBook], Error>).self) { group in
                 // 滑动窗口：最多 limit 个源同时抓取，完成一个再补一个，
                 // 避免几百个源同时建 JSVirtualMachine 把内存打爆。
@@ -78,13 +116,15 @@ final class SearchViewModel: ObservableObject {
                     let source = candidates[next]
                     next += 1
                     group.addTask {
-                        let engine = SourceEngine(source: source)
-                        do {
-                            let books = try await engine.search(keyword: value, page: page)
-                            return (source.id, .success(books))
-                        } catch {
-                            return (source.id, .failure(error))
+                        let outcome = await Self.withTimeout(perSource) {
+                            let engine = SourceEngine(source: source)
+                            do {
+                                return .success(try await engine.search(keyword: value, page: page))
+                            } catch {
+                                return .failure(error)
+                            }
                         }
+                        return (source.id, outcome)
                     }
                 }
                 for await (sourceId, outcome) in group {
@@ -97,18 +137,20 @@ final class SearchViewModel: ObservableObject {
                         let source = candidates[next]
                         next += 1
                         group.addTask {
-                            let engine = SourceEngine(source: source)
-                            do {
-                                let books = try await engine.search(keyword: value, page: page)
-                                return (source.id, .success(books))
-                            } catch {
-                                return (source.id, .failure(error))
+                            let outcome = await Self.withTimeout(perSource) {
+                                let engine = SourceEngine(source: source)
+                                do {
+                                    return .success(try await engine.search(keyword: value, page: page))
+                                } catch {
+                                    return .failure(error)
+                                }
                             }
+                            return (source.id, outcome)
                         }
                     }
                 }
             }
-            // 超时跳过的源不会再有回调，这里收尾，避免一直转圈。
+            // 未跑完的源收尾，避免一直转圈。
             self.finishPending()
             self.isSearching = false
         }
@@ -119,7 +161,7 @@ final class SearchViewModel: ObservableObject {
         for index in results.indices where results[index].isLoading {
             results[index].isLoading = false
             if results[index].books.isEmpty, results[index].error == nil {
-                results[index].error = "已跳过（搜索超时）"
+                results[index].error = "未搜索（已停止）"
             }
         }
     }
