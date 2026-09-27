@@ -175,8 +175,11 @@ struct RssSourceListView: View {
         return list
     }
 
+    /// 同书源列表：渲染前按 id 去重，避免 ForEach 重复 id 直接崩溃。
     private var visibleSources: [RssSource] {
-        Array(filtered.prefix(renderLimit))
+        var seen = Set<String>()
+        let unique = filtered.filter { seen.insert($0.id).inserted }
+        return Array(unique.prefix(renderLimit))
     }
 
     private func copyAll() {
