@@ -33,8 +33,12 @@ final class SearchViewModel: ObservableObject {
     ///
     /// 书源动辄几百个：如果每个源都立刻起一个任务，就会同时创建几百个
     /// JSVirtualMachine（每个源一个），内存瞬间飙升被系统强杀。
-    /// 压到 6 个既不会给系统压力，整体速度也几乎不受影响。
-    private let concurrentLimit = 6
+    /// 10 个既能跑满网络，JSVM 数量也远低于危险线。
+    private let concurrentLimit = 10
+
+    /// 单轮搜索的总时限：超过后不再启动新的书源任务，
+    /// 已在跑的任务继续跑完。避免几百个失效源把一轮搜索拖到十几分钟。
+    private let searchDeadline: TimeInterval = 60
 
     var totalCount: Int {
         results.reduce(0) { $0 + $1.books.count }
@@ -64,6 +68,8 @@ final class SearchViewModel: ObservableObject {
             guard let self else { return }
             let limit = self.concurrentLimit
             let total = candidates.count
+            let started = Date()
+            func outOfTime() -> Bool { Date().timeIntervalSince(started) > self.searchDeadline }
             await withTaskGroup(of: (String, Result<[SearchBook], Error>).self) { group in
                 // 滑动窗口：最多 limit 个源同时抓取，完成一个再补一个，
                 // 避免几百个源同时建 JSVirtualMachine 把内存打爆。
@@ -87,7 +93,7 @@ final class SearchViewModel: ObservableObject {
                         break
                     }
                     self.apply(sourceId: sourceId, outcome: outcome)
-                    if next < total {
+                    if next < total, !outOfTime() {
                         let source = candidates[next]
                         next += 1
                         group.addTask {
@@ -102,7 +108,19 @@ final class SearchViewModel: ObservableObject {
                     }
                 }
             }
+            // 超时跳过的源不会再有回调，这里收尾，避免一直转圈。
+            self.finishPending()
             self.isSearching = false
+        }
+    }
+
+    /// 把仍在加载中的条目标记为完成（用于超时 / 取消后的收尾）。
+    private func finishPending() {
+        for index in results.indices where results[index].isLoading {
+            results[index].isLoading = false
+            if results[index].books.isEmpty, results[index].error == nil {
+                results[index].error = "已跳过（搜索超时）"
+            }
         }
     }
 
@@ -120,7 +138,7 @@ final class SearchViewModel: ObservableObject {
             results[index].books = books.filter { !$0.name.isEmpty }
             results[index].isLoading = false
         case .failure(let error):
-            results[index].error = error.localizedDescription
+            results[index].error = SourceError.describe(error)
             results[index].isLoading = false
         }
     }
