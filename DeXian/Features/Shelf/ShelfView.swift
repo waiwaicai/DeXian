@@ -8,7 +8,9 @@ struct ShelfView: View {
     @State private var selectedGroupId: String?
     @State private var isSelecting = false
     @State private var selection = Set<String>()
+    /// 右上角「+」：跳到书源导入（原先只置了 showImport 却没绑定任何弹窗，点了没反应）
     @State private var showImport = false
+    @State private var showSearch = false
     @State private var showGroupSheet = false
 
     private let columns = [
@@ -47,6 +49,26 @@ struct ShelfView: View {
             if isSelecting { selectionBar }
         }
         .sheet(isPresented: $showGroupSheet) { groupSheet }
+        .sheet(isPresented: $showImport) {
+            NavigationStack {
+                ImportSourceView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("完成") { showImport = false }
+                        }
+                    }
+            }
+        }
+        .fullScreenCover(isPresented: $showSearch) {
+            NavigationStack {
+                SearchView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("完成") { showSearch = false }
+                        }
+                    }
+            }
+        }
     }
 
     // MARK: 分组筛选
@@ -215,8 +237,22 @@ struct ShelfView: View {
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
-            Button {
-                showImport = true
+            Menu {
+                Button {
+                    showSearch = true
+                } label: {
+                    Label("搜索添加", systemImage: "magnifyingglass")
+                }
+                Button {
+                    showImport = true
+                } label: {
+                    Label("导入书源", systemImage: "square.and.arrow.down")
+                }
+                Button {
+                    appState.selectedTab = .settings
+                } label: {
+                    Label("书源管理", systemImage: "list.bullet")
+                }
             } label: {
                 Image(systemName: "plus")
             }
