@@ -48,9 +48,12 @@ targets:
           - audio
         NSCameraUsageDescription: 用于扫描书源分享二维码
         NSLocalNetworkUsageDescription: 书源可能位于局域网（例如自建的阅读服务器）
+        # 只保留 NSAllowsArbitraryLoads：书源大量使用明文 http，
+        # 且应用内没有任何 WKWebView。iOS 10+ 只要出现
+        # NSAllowsArbitraryLoadsInWebContent，就会忽略 NSAllowsArbitraryLoads，
+        # 导致所有 http 书源被 ATS 拦截（"resource could not be loaded"）。
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsArbitraryLoadsInWebContent: true
         LSApplicationQueriesSchemes:
           - http
           - https
@@ -61,8 +64,8 @@ targets:
         PRODUCT_NAME: DeXian
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        CURRENT_PROJECT_VERSION: "1"
-        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.0.1"
 
   DeXianTests:
     type: bundle.unit-test
