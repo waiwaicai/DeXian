@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct DeXianApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var webAuth = WebAuthPresenter.shared
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +15,10 @@ struct DeXianApp: App {
                 .environmentObject(appState.settings)
                 .preferredColorScheme(appState.settings.appearance.colorScheme)
                 .tint(Theme.Palette.brand)
+                // 书源需要用户过验证 / 登录时弹出网页
+                .sheet(item: $webAuth.request) { request in
+                    WebAuthView(request: request, presenter: webAuth)
+                }
         }
     }
 }
