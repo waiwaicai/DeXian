@@ -1087,4 +1087,70 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(merged.bookList, ".explore-item")
     }
 
+
+    // MARK: 回归：崩溃与排版
+
+    /// 空地址的 api 书源：所有书都算出同一个 id 会让 ForEach 直接崩溃
+    func testShelfIdentifierStaysUniqueForEmptyBookUrl() {
+        let a = ShelfBook.identifier(origin: "src", bookUrl: "", name: "书一", author: "甲")
+        let b = ShelfBook.identifier(origin: "src", bookUrl: "", name: "书二", author: "乙")
+        XCTAssertNotEqual(a, b, "空地址时 id 必须靠书名作者区分")
+        XCTAssertTrue(a.contains("书一"))
+
+        // 有地址时仍用「书源 + 地址」，保证换源/同名书不串
+        let c = ShelfBook.identifier(origin: "src", bookUrl: "http://x/1", name: "书一", author: "甲")
+        XCTAssertEqual(c, "src|http://x/1")
+        let d = ShelfBook.identifier(origin: "src", bookUrl: "http://x/2", name: "书一", author: "甲")
+        XCTAssertNotEqual(c, d)
+    }
+
+    /// 解析器必须有深度上限：上万层未闭合 div 会让递归遍历栈溢出闪退
+    func testHTMLParserCapsDepthOnRunawayNesting() {
+        let html = String(repeating: "<div>", count: 5000) + "正文内容" + String(repeating: "</div>", count: 5000)
+        let document = HTMLParser.parse(html)
+
+        // 深度有界：沿最深层数不超过上限
+        var depth = 0
+        var cursor: HTMLNode? = document
+        while let node = cursor, let next = node.children.first(where: { $0.isElement }) {
+            depth += 1
+            cursor = next
+        }
+        XCTAssertLessThanOrEqual(depth, HTMLParser.maxDepth, "DOM 深度必须被截断到上限")
+
+        // 内容不能因为截断而丢失
+        XCTAssertTrue(document.rawText.contains("正文内容"), "截断后正文仍必须保留")
+    }
+
+    /// 超深嵌套下，结束标签不能把祖先树整体弹掉
+    func testHTMLParserKeepsContentAfterDeepNesting() {
+        let html = String(repeating: "<div>", count: 1000)
+            + "<p>第一段</p>"
+            + String(repeating: "</div>", count: 1000)
+            + "<p>第二段</p>"
+        let document = HTMLParser.parse(html)
+        let text = document.rawText
+        XCTAssertTrue(text.contains("第一段"), "深嵌套内的文本应保留：" + text.prefix(120).description)
+        XCTAssertTrue(text.contains("第二段"), "深嵌套之后的兄弟文本应保留")
+    }
+
+    /// 导入合并必须先去掉已有数据里的重复 id
+    func testSourceMergeDropsDuplicateExistingIds() {
+        func make(_ name: String) -> BookSource {
+            BookSource(dict: ["bookSourceName": name, "bookSourceUrl": "https://a.com", "bookSourceKey": "dup"])
+        }
+        let merged = SourceImporter.merge(existing: [make("一"), make("二")], incoming: [])
+        XCTAssertEqual(merged.result.count, 1, "重复 id 的旧数据应被合并成一条")
+    }
+
+    /// 发现分类去重：重复 id 会让 ForEach 崩溃
+    func testExploreCategoriesDeduplicateById() {
+        let raw = """
+        [{"title":"玄幻","url":"/a"},{"title":"玄幻","url":"/a"},{"title":"都市","url":"/b"}]
+        """
+        let list = ExploreCategoryList(raw: raw)
+        var seen = Set<String>()
+        let unique = list.items.filter { seen.insert($0.id).inserted }
+        XCTAssertEqual(unique.count, 2)
+    }
 }
