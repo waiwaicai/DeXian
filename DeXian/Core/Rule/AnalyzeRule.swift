@@ -26,6 +26,20 @@ enum RuleValue {
         return []
     }
 
+    /// 保留段落的文本形态：块级标签产生换行，<br> 产生换行。
+    /// 与 strings 的区别仅在于节点集合的处理方式。
+    var paragraphStrings: [String] {
+        switch self {
+        case .nodes(let nodes):
+            return nodes.map { $0.textWithBreaks }
+        case .strings(let values):
+            return values
+        case .raw(let any):
+            if let list = any as? [Any] { return list.map { RuleUtil.asString($0) ?? "" } }
+            return RuleUtil.asString(any).map { [$0] } ?? []
+        }
+    }
+
     var isEmpty: Bool {
         switch self {
         case .nodes(let nodes): return nodes.isEmpty
@@ -109,6 +123,10 @@ final class AnalyzeRule {
 
     // MARK: 对外接口
 
+    /// 正文抽取模式：节点结果按块级标签保留换行，段落不再被压平
+    /// 只在解析正文时开启；搜索/目录等短字段仍用纯文本。
+    var paragraphs = false
+
     func string(_ rule: String?) -> String {
         stringList(rule).first ?? ""
     }
@@ -117,7 +135,10 @@ final class AnalyzeRule {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
             let value = evaluateRule(branch)
-            let strings = value.strings
+            // 正文抽取时保留段落：节点结果若直接拼接子文本，
+            // <p>…</p><p>…</p> 会被压成一整行，阅读时排版全乱。
+            // 列表 / 标题等短字段仍走纯文本，避免书名里混进换行。
+            let strings = (paragraphs ? value.paragraphStrings : value.strings)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             if !strings.isEmpty { return strings }
