@@ -16,6 +16,24 @@ enum BookType: Int, Codable {
     }
 }
 
+/// 漫画源能否在没有章节目录的情况下直接进入阅读。
+///
+/// 漫画书源绝大多数不提供目录：整本就是一个阅读页，目录规则留空。
+/// 旧版详情页用 chapters.isEmpty 判断按钮可用性，于是这类书永远停在
+/// 「目录获取失败」而且按钮是灰的 —— 用户点不进去，只能看着报错，
+/// 反复重试又叠加网络请求，最后崩掉。
+///
+/// 这里单独抽出判断，既能让详情页放行，也能被单元测试覆盖。
+/// 只对漫画放行：小说源目录失败时进去只会看到空白，反而更糟。
+enum ReaderEntryPolicy {
+    static func canOpenWithoutToc(type: BookType, tocUrl: String?, bookUrl: String) -> Bool {
+        guard type == .image else { return false }
+        let toc = (tocUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !toc.isEmpty { return true }
+        return !bookUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 /// 搜索 / 发现得到的书籍条目
 struct SearchBook: Codable, Hashable, Identifiable {
     /// 列表展示用的稳定 id。
