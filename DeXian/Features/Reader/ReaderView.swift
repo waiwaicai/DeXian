@@ -1,5 +1,29 @@
 import SwiftUI
 
+/// 正文文本归一化：滚动模式与翻页模式必须用同一份结果，
+/// 否则同一章在两种模式下的分段与缩进会不一致。
+enum ReaderTextFormatting {
+    /// 把原始正文转成展示用文本：丢弃空行，段首按需缩进两格
+    static func displayText(_ content: String, indent: Bool) -> String {
+        guard !content.isEmpty else { return "" }
+        var lines: [String] = []
+        for line in content.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            lines.append(indent ? "　　" + trimmed : trimmed)
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// 阅读页统一的尺寸常量
+enum ReaderMetrics {
+    /// 自绘顶部工具条占用的高度（正文与分页都要让开这一段）
+    static let topInset: CGFloat = 52
+    /// 底部为工具条预留的高度：正文最后一行不能被浮层压住
+    static let bottomInset: CGFloat = 92
+}
+
 /// 阅读页：自动区分文字与漫画
 struct ReaderView: View {
     @EnvironmentObject private var appState: AppState
@@ -24,38 +48,29 @@ struct ReaderView: View {
         ZStack {
             readerBackground
 
-            contentArea
-
-            // 轻点分区层：夹在内容与浮层之间。
-            // 只有点击手势、没有拖动识别，所以下面的正文与漫画照常滚动；
-            // 又位于 chromeOverlay 之下，底部按钮的点击不会被它截走。
-            tapLayer
-        }
-        // 浮层改用 overlay：overlay 的尺寸由父级决定，
-        // 绝不会反过来把父级撑大。
-        //
-        // 原先 bottomBar 直接放在 ZStack 里参与尺寸计算，它的固有宽度
-        // （5 个按钮 52pt + 4 段 Spacing.xl 间距）在窄屏上超过屏幕宽度，
-        // 于是整个 ZStack 被撑得比屏幕还宽，正文容器随之变宽并溢出屏幕 ——
-        // 表现就是「一点正文，字的排序和大小全变了」，右侧文字还会被裁掉。
-        .overlay(alignment: .bottom) {
-            if showChrome {
-                chromeOverlay
-            } else if viewModel.isComic, !viewModel.images.isEmpty {
-                comicBadge
+            // 正文容器自带轻点分区手势（simultaneousGesture），
+            // 不再叠一层 Color.clear 的 tapLayer ——
+            // 那一层铺满全屏、吃掉了所有拖动事件，
+            // 表现就是「页面无法上下滑动」。
+            GeometryReader { geometry in
+                tapHandling(contentArea, geometry: geometry)
             }
         }
+        // 顶部与底部工具条都改成自绘浮层。
+        //
+        // 关键点：不再用系统导航栏显示/隐藏来控制顶部条。
+        // 导航栏显隐会改变顶部安全区，正文被迫重排 ——
+        // 用户看到的就是「一弹出顶部框，字的排序和大小全变了」。
+        // 自绘浮层不参与布局，显隐都不影响正文。
+        .overlay { chromeOverlay }
         .navigationBarBackButtonHidden(true)
-        // 导航栏常驻。
-        // 原先随 showChrome 显示/隐藏会改变顶部安全区，正文被迫重排，
-        // 看上去就是「一点正文，字号和排序全变了」。改为常驻后布局稳定，
-        // showChrome 只控制底部工具条。
-        .toolbar(.visible, for: .navigationBar)
-        .toolbar { toolbarContent }
-        // 换章后收起工具条。只改状态，不重建视图，
-        // 所以不会再出现「翻一章就整页重排」的跳动。
-        .onChange(of: viewModel.currentIndex) { _ in
-            showChrome = false
+        .toolbar(.hidden, for: .navigationBar)
+        // 工具条自动隐藏：显示后 4 秒无操作自动收起
+        .task(id: showChrome) {
+            guard showChrome else { return }
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.2)) { showChrome = false }
         }
         .task {
             await viewModel.loadTocIfNeeded()
@@ -66,15 +81,43 @@ struct ReaderView: View {
                 viewModel.preloadNeighbors()
             }
         }
+        .onChange(of: viewModel.currentIndex) { _ in
+            withAnimation(.easeOut(duration: 0.18)) { showChrome = false }
+        }
         .sheet(isPresented: $showCatalog) {
             CatalogView(viewModel: viewModel)
         }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet()
         }
+        // 刻意不用 .statusBar(hidden:)：状态栏显隐会改变顶部安全区，
+        // 正文会被迫重排 —— 那正是用户反馈的「字排着排着就变了」。
     }
 
-    /// 漫画模式下的极简状态条：当前页码 / 总页数
+    /// 给滚动 / 漫画 / 听书模式挂轻点分区手势。
+    ///
+    /// 翻页模式（PagedReaderView）自己处理左右轻点翻页，
+    /// 这里必须跳过，否则两套手势会同时触发。
+    /// 用 simultaneousGesture 而不是叠一层 Color.clear：
+    /// 那种铺满全屏的透明层会吃掉拖动事件，页面就没法上下滑动了。
+    @ViewBuilder
+    private func tapHandling<C: View>(_ content: C, geometry: GeometryProxy) -> some View {
+        if isPagedSurface {
+            content
+        } else {
+            content.simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        handleTap(
+                            x: value.location.x / max(geometry.size.width, 1),
+                            y: value.location.y / max(geometry.size.height, 1)
+                        )
+                    }
+            )
+        }
+    }
+
+    /// 漫画模式下的极简状态条
     private var comicBadge: some View {
         VStack {
             Spacer()
@@ -94,31 +137,11 @@ struct ReaderView: View {
         readerPalette.background == 0xFAF8F4 ? Theme.ColorToken.textPrimary : Color(hex: 0xE8EAEE)
     }
 
-    // MARK: 手势层
+    // MARK: 轻点分区
 
-    /// 轻点分区层。
-    ///
-    /// 用 SpatialTapGesture 取点击坐标：带 (CGPoint) -> Void 的
-    /// onTapGesture 重载要 iOS 17，本工程部署目标是 iOS 16。
-    private var tapLayer: some View {
-        GeometryReader { geometry in
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(
-                    SpatialTapGesture()
-                        .onEnded { value in
-                            handleTap(x: value.location.x / max(geometry.size.width, 1))
-                        }
-                )
-        }
-        .ignoresSafeArea(edges: .bottom)
-    }
-
-    /// 轻点分区：左 30% 上一章、右 30% 下一章、中间 40% 收展工具条。
-    ///
-    /// 原先整屏只有一个「切换菜单」的响应，点正文永远不会翻页；
-    /// 而且翻章藏在双击里，用户根本发现不了。改成三分区后单击即可翻章。
-    private func handleTap(x: CGFloat) {
+    /// 轻点分区：左 30% 上一章 / 上一页，右 30% 下一章 / 下一页，
+    /// 中间 40% 收展工具条。
+    private func handleTap(x: CGFloat, y: CGFloat) {
         // 听书与漫画都是连续滚动，误触翻章体验很差，只收展工具条
         if isAudioSurface || viewModel.isComic {
             withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
@@ -154,6 +177,11 @@ struct ReaderView: View {
 
     /// 音频源本身，或用户主动切到听书界面
     private var isAudioSurface: Bool { viewModel.isAudio || audioMode }
+
+    /// 是否处于「整页翻页」阅读模式
+    private var isPagedSurface: Bool {
+        !isAudioSurface && !viewModel.isComic && settings.pageTurn != .scroll
+    }
 
     @ViewBuilder
     private var contentArea: some View {
@@ -196,27 +224,113 @@ struct ReaderView: View {
                     // 仅换章时重建（用于重置已放行页数）；
                     // 不再用全局令牌，避免每次翻章都重建整个阅读视图造成排版跳动。
                     .id(viewModel.currentIndex)
-                } else {
+                } else if settings.pageTurn == .scroll {
+                    // 滚动模式：连续长文
                     TextReaderView(viewModel: viewModel)
+                } else {
+                    // 翻页模式：按屏幕切页，支持覆盖 / 平移 / 无动画
+                    PagedReaderView(viewModel: viewModel, showChrome: $showChrome)
+                        .id(viewModel.currentIndex)
                 }
             }
         }
     }
 
-    // MARK: 阅读时浮层（点击中间区域切换）
+    // MARK: 自绘浮层（顶部 + 底部）
 
-    /// 阅读浮层：只保留底部工具条。
-    ///
-    /// 顶部信息交给常驻导航栏显示。原先这里还有一条 topBar，
-    /// 与导航栏叠成两层；而且导航栏随 showChrome 显隐会改变顶部安全区，
-    /// 正文被迫重排，用户看到的就是「一弹出顶部框，字就重排/变大小」。
     private var chromeOverlay: some View {
         VStack(spacing: 0) {
-            Spacer()
-            cacheProgressBar
-            bottomBar
+            if showChrome { topBar }
+            Spacer(minLength: 0)
+            if showChrome {
+                cacheProgressBar
+                bottomBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if viewModel.isComic, !viewModel.images.isEmpty {
+                comicBadge
+            }
         }
-        .transition(.opacity)
+        .animation(.easeOut(duration: 0.2), value: showChrome)
+    }
+
+    /// 自绘顶栏：返回 + 章节标题 + 进度 + 更多菜单。
+    /// 不占用布局空间，因此显隐不会让正文重排。
+    private var topBar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(chromeTextColor)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            VStack(spacing: 1) {
+                Text(viewModel.currentChapter?.title ?? viewModel.book.name)
+                    .font(.themeCaptionBold)
+                    .foregroundStyle(chromeTextColor)
+                    .lineLimit(1)
+                if settings.showProgress {
+                    Text(viewModel.progressText)
+                        .font(.themeTiny)
+                        .foregroundStyle(chromeTextColor.opacity(0.65))
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            readerMenu
+        }
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
+        .background(.ultraThinMaterial)
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private var readerMenu: some View {
+        Menu {
+            Button {
+                showCatalog = true
+            } label: { Label("目录", systemImage: "list.bullet") }
+
+            Button {
+                showSettings = true
+            } label: { Label("排版设置", systemImage: "textformat.size") }
+
+            if !viewModel.isAudio {
+                Button {
+                    audioMode.toggle()
+                } label: {
+                    Label(audioMode ? "退出听书" : "听书", systemImage: audioMode ? "book" : "headphones")
+                }
+            }
+
+            Button {
+                viewModel.cacheAll()
+            } label: {
+                Label(viewModel.cacheAllText,
+                      systemImage: viewModel.isCachingAll ? "stop.circle" : "arrow.down.circle")
+            }
+            .disabled(viewModel.chapters.isEmpty || viewModel.isAudio)
+
+            if viewModel.cachedChapterCount > 0 {
+                Button(role: .destructive) {
+                    viewModel.clearCache()
+                } label: { Label("清理离线缓存", systemImage: "trash") }
+            }
+
+            Button {
+                Task { await viewModel.reloadToc() }
+            } label: { Label("刷新目录", systemImage: "arrow.clockwise") }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(chromeTextColor)
+                .frame(width: 34, height: 34)
+                .contentShape(Rectangle())
+        }
     }
 
     /// 整本缓存进度条：下载中才出现
@@ -272,7 +386,7 @@ struct ReaderView: View {
                 chromeButton("界面", systemImage: "textformat.size") { showSettings = true }
             }
         }
-        // 工具条必须能收进屏幕：5 个按钮在窄屏（SE 320pt）上按 52pt 最小宽
+        // 工具条必须能收进屏幕：5 个按钮在窄屏（SE 320pt）上按固定宽
         // 会算出比屏幕还宽的固有尺寸，把整个容器撑大，正文随之变宽位移。
         .frame(maxWidth: .infinity)
         .padding(.horizontal, Theme.Spacing.md)
@@ -296,74 +410,9 @@ struct ReaderView: View {
         }
         .buttonStyle(.plain)
     }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        // 顶部标题：章节名 + 进度。常驻显示，布局稳定。
-        ToolbarItem(placement: .principal) {
-            VStack(spacing: 1) {
-                Text(viewModel.currentChapter?.title ?? viewModel.book.name)
-                    .font(.themeCaptionBold)
-                    .foregroundStyle(Theme.ColorToken.textPrimary)
-                    .lineLimit(1)
-                if settings.showProgress {
-                    Text(viewModel.progressText)
-                        .font(.themeTiny)
-                        .foregroundStyle(Theme.ColorToken.textTertiary)
-                }
-            }
-        }
-        ToolbarItem(placement: .navigationBarLeading) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-        }
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Menu {
-                Button {
-                    showCatalog = true
-                } label: { Label("目录", systemImage: "list.bullet") }
-
-                Button {
-                    showSettings = true
-                } label: { Label("排版设置", systemImage: "textformat.size") }
-
-                if !viewModel.isAudio {
-                    Button {
-                        audioMode.toggle()
-                    } label: {
-                        Label(audioMode ? "退出听书" : "听书", systemImage: audioMode ? "book" : "headphones")
-                    }
-                }
-
-                Button {
-                    viewModel.cacheAll()
-                } label: {
-                    Label(viewModel.cacheAllText,
-                          systemImage: viewModel.isCachingAll ? "stop.circle" : "arrow.down.circle")
-                }
-                .disabled(viewModel.chapters.isEmpty || viewModel.isAudio)
-
-                if viewModel.cachedChapterCount > 0 {
-                    Button(role: .destructive) {
-                        viewModel.clearCache()
-                    } label: { Label("清理离线缓存", systemImage: "trash") }
-                }
-
-                Button {
-                    Task { await viewModel.reloadToc() }
-                } label: { Label("刷新目录", systemImage: "arrow.clockwise") }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-        }
-    }
 }
 
-// MARK: - 文字阅读
+// MARK: - 文字阅读（滚动）
 
 struct TextReaderView: View {
     @ObservedObject var viewModel: ReaderViewModel
@@ -396,8 +445,9 @@ struct TextReaderView: View {
                     chapterFooter
                 }
                 .padding(.horizontal, Theme.Spacing.xl)
-                .padding(.top, Theme.Spacing.xxl + Theme.Spacing.xl)
-                .padding(.bottom, Theme.Spacing.xxl * 2)
+                // 顶部与底部都留出自绘工具条的高度，展开时不会盖住正文
+                .padding(.top, ReaderMetrics.topInset)
+                .padding(.bottom, ReaderMetrics.bottomInset)
             }
             .onChange(of: viewModel.currentIndex) { _ in
                 proxy.scrollTo("content", anchor: .top)
@@ -464,18 +514,288 @@ struct TextReaderView: View {
 
     /// 正文分段：空行丢弃，段首按设置决定是否缩进两格
     private var paragraphs: [String] {
-        let value = viewModel.content
-        guard !value.isEmpty else { return [] }
-        var output: [String] = []
-        for line in value.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            output.append(settings.textIndent ? "　　" + trimmed : trimmed)
-        }
-        return output
+        let text = ReaderTextFormatting.displayText(
+            viewModel.content, indent: settings.textIndent
+        )
+        return text.isEmpty ? [] : text.components(separatedBy: "\n")
     }
 
     /// 正文颜色：与 ReaderView 的背景选择保持一致
+    private var textColor: Color {
+        if settings.readerFollowsSystem {
+            return colorScheme == .dark ? Color(hex: 0xC9CDD4) : Color(hex: 0x2A2D33)
+        }
+        return Color(hex: settings.readerTheme.textColor)
+    }
+}
+
+// MARK: - 文字阅读（翻页）
+
+/// 整页翻页阅读器。
+///
+/// 覆盖 / 平移 / 无动画三种模式在这里真正生效：
+/// 先用 PageSplitter 按屏幕尺寸把本章切页，再按所选模式做转场。
+struct PagedReaderView: View {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Binding var showChrome: Bool
+    @EnvironmentObject private var settings: SettingsStore
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var pages: [String] = []
+    @State private var pageIndex = 0
+    /// 是否正在分页：分页是异步的，期间不能误报「本章暂无正文」
+    @State private var isPaginating = false
+    /// 翻页方向：1 前进、-1 后退，用于决定转场方向
+    @State private var direction = 1
+    @State private var size: CGSize = .zero
+
+    /// 排版相关参数，任一变化都要重新分页
+    private struct LayoutKey: Equatable {
+        var width: Int
+        var height: Int
+        var fontSize: Int
+        var lineSpacing: Int
+        var paragraphSpacing: Int
+        var family: String
+        var indent: Bool
+        /// 正文长度：内容一变就要重新分页（用长度而不是全文，避免每帧重排）
+        var contentLength: Int
+    }
+
+    /// 排版 key。
+    ///
+    /// 注意：这里刻意只用尺寸、字号等「便宜」的参数，
+    /// 正文本身用 `viewModel.content.count` 参与比较 ——
+    /// 直接对整章做格式化会在这个属性被读取时重排全文，
+    /// 而这个属性每帧都会被 SwiftUI 求值。
+    private var layoutKey: LayoutKey {
+        LayoutKey(
+            width: Int(size.width.rounded()),
+            height: Int(size.height.rounded()),
+            fontSize: Int(settings.fontSize.rounded()),
+            lineSpacing: Int(settings.lineSpacing.rounded()),
+            paragraphSpacing: Int(settings.paragraphSpacing.rounded()),
+            family: settings.fontFamily,
+            indent: settings.textIndent,
+            contentLength: viewModel.content.count
+        )
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                pageBody
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                pageFooter
+            }
+            .padding(.horizontal, Theme.Spacing.xl)
+            .padding(.top, ReaderMetrics.topInset)
+            .padding(.bottom, ReaderMetrics.bottomInset)
+            .onAppear { size = geometry.size }
+            .onChange(of: geometry.size) { value in size = value }
+        }
+        .task(id: layoutKey) { await repaginate() }
+        .contentShape(Rectangle())
+        // 拖动翻页：与左右轻点并存，翻页模式下手感接近原生阅读器
+        .gesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    let dx = value.translation.width
+                    guard abs(dx) > 40 else { return }
+                    if dx < 0 { turnForward() } else { turnBackward() }
+                }
+        )
+        .simultaneousGesture(
+            SpatialTapGesture()
+                .onEnded { value in
+                    let ratio = value.location.x / max(size.width, 1)
+                    if ratio < 0.3 {
+                        turnBackward()
+                    } else if ratio > 0.7 {
+                        turnForward()
+                    } else {
+                        withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
+                    }
+                }
+        )
+    }
+
+    @ViewBuilder
+    private var pageBody: some View {
+        if viewModel.isLoadingContent, viewModel.content.isEmpty {
+            VStack(spacing: Theme.Spacing.sm) {
+                ProgressView().controlSize(.small)
+                Text("正在加载正文")
+                    .font(.themeCaption)
+                    .foregroundStyle(Theme.ColorToken.textTertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if pages.isEmpty, isPaginating {
+            VStack(spacing: Theme.Spacing.sm) {
+                ProgressView().controlSize(.small)
+                Text("正在排版")
+                    .font(.themeCaption)
+                    .foregroundStyle(Theme.ColorToken.textTertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if pages.isEmpty {
+            EmptyStateView(
+                systemImage: "doc.text",
+                title: "本章暂无正文",
+                message: "可能是付费章节，或书源规则需要更新。"
+            )
+        } else {
+            let current = pages.indices.contains(pageIndex) ? pages[pageIndex] : ""
+            Text(current)
+                // 刻意用与分页测量完全相同的 UIFont 转成 Font：
+                // 用 settings.readingFont 会因圆体等设计差异导致度量不一致，
+                // 每页末尾的字会被裁掉。
+                .font(Font(PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize)))
+                .lineSpacing(settings.lineSpacing)
+                .foregroundStyle(textColor)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // .id 让每一页成为独立视图，转场才能按方向移动
+                .id(pageIndex)
+                .transition(pageTransition)
+        }
+    }
+
+    /// 三种翻页动画
+    private var pageTransition: AnyTransition {
+        switch settings.pageTurn {
+        case .cover:
+            // 覆盖：新页从右侧盖上来，旧页留在原地
+            return .asymmetric(
+                insertion: .move(edge: direction > 0 ? .trailing : .leading),
+                removal: .opacity
+            )
+        case .slide:
+            // 平移：新旧页一起横向移动
+            return .asymmetric(
+                insertion: .move(edge: direction > 0 ? .trailing : .leading),
+                removal: .move(edge: direction > 0 ? .leading : .trailing)
+            )
+        case .none, .scroll:
+            return .identity
+        }
+    }
+
+    private var pageFooter: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            Button {
+                turnBackward()
+            } label: {
+                Label("上一页", systemImage: "chevron.left")
+                    .font(.themeCaption)
+                    .foregroundStyle(Theme.Palette.brand)
+            }
+            .buttonStyle(.plain)
+            .disabled(pages.isEmpty || (pageIndex == 0 && viewModel.currentIndex == 0))
+
+            Spacer(minLength: 0)
+
+            Text(String(min(pageIndex + 1, max(pages.count, 1))) + "/" + String(max(pages.count, 1))
+                 + " · " + viewModel.progressText)
+                .font(.themeTiny)
+                .foregroundStyle(Theme.ColorToken.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            Spacer(minLength: 0)
+
+            Button {
+                turnForward()
+            } label: {
+                Label("下一页", systemImage: "chevron.right")
+                    .font(.themeCaption)
+                    .foregroundStyle(Theme.Palette.brand)
+            }
+            .buttonStyle(.plain)
+            .disabled(pages.isEmpty
+                      || (pageIndex >= pages.count - 1
+                          && viewModel.currentIndex >= viewModel.chapters.count - 1))
+        }
+        .padding(.top, Theme.Spacing.sm)
+    }
+
+    // MARK: 分页与翻页
+
+    /// 重新分页：计算放到后台线程，避免长章卡住主线程
+    private func repaginate() async {
+        // 与滚动模式共用同一份格式化结果，两种模式排版才一致
+        let content = ReaderTextFormatting.displayText(
+            viewModel.content, indent: settings.textIndent
+        )
+        guard !content.isEmpty else {
+            pages = []
+            pageIndex = 0
+            isPaginating = false
+            return
+        }
+        // 尺寸还没测量好：保持现状，等下一次尺寸回调再算
+        guard size.width > 40, size.height > 80 else { return }
+
+        // 顶部与底部内边距必须从可用高度里扣掉，否则每页末尾的字会被裁掉。
+        // 还要再扣掉分页页脚（上一页 / 下一页）那一行的高度。
+        let reserved: CGFloat = ReaderMetrics.topInset
+            + ReaderMetrics.bottomInset
+            + Theme.Spacing.xl + Theme.Spacing.lg
+        let layout = PageSplitter.Layout(
+            font: PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize),
+            lineSpacing: settings.lineSpacing,
+            paragraphSpacing: settings.paragraphSpacing,
+            indent: settings.textIndent,
+            height: max(120, size.height - reserved),
+            width: max(120, size.width - Theme.Spacing.xl * 2)
+        )
+        // 段首已经带了「　　」，排版层不能再缩进一次
+        var adjusted = layout
+        adjusted.indent = false
+
+        isPaginating = true
+        let result = await Background.run {
+            PageSplitter.paginate(text: content, layout: adjusted)
+        }
+        // 已被新一次分页取代：不要写回旧结果
+        guard !Task.isCancelled else { return }
+        pages = result
+        isPaginating = false
+        pageIndex = min(pageIndex, max(0, result.count - 1))
+    }
+
+    private func turnForward() {
+        // 还没分好页（或本章没有正文）：什么也不做，避免误跳章
+        guard !pages.isEmpty, !isPaginating else { return }
+        if pageIndex < pages.count - 1 {
+            direction = 1
+            advance { pageIndex += 1 }
+        } else {
+            // 最后一页：进入下一章，从第 1 页开始
+            pageIndex = 0
+            Task { await viewModel.goNext() }
+        }
+    }
+
+    private func turnBackward() {
+        guard !pages.isEmpty, !isPaginating else { return }
+        if pageIndex > 0 {
+            direction = -1
+            advance { pageIndex -= 1 }
+        } else {
+            Task { await viewModel.goPrevious() }
+        }
+    }
+
+    /// 无动画模式下直接改状态，其余模式包一层动画
+    private func advance(_ change: () -> Void) {
+        if settings.pageTurn == .none {
+            change()
+        } else {
+            withAnimation(.easeOut(duration: 0.22)) { change() }
+        }
+    }
+
     private var textColor: Color {
         if settings.readerFollowsSystem {
             return colorScheme == .dark ? Color(hex: 0xC9CDD4) : Color(hex: 0x2A2D33)

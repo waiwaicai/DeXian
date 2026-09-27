@@ -29,7 +29,13 @@ final class ReaderViewModel: ObservableObject {
     /// 书源缺失时为 nil，界面会提示换源
     private let engine: SourceEngine?
     private let shelf: ShelfStore
+    /// 正文内存缓存。
+    ///
+    /// 每章正文几千到几万字，翻几百章就会累积到几十 MB。
+    /// 这里限制条数，超出后按插入顺序淘汰最早的章节（保留当前几章）。
     private var contentCache: [String: ChapterContent] = [:]
+    private var contentCacheOrder: [String] = []
+    private let contentCacheLimit = 12
     private var loadTask: Task<Void, Never>?
     private var cacheObserver: AnyCancellable?
 
@@ -148,6 +154,7 @@ final class ReaderViewModel: ObservableObject {
         loadTask = nil
 
         if let cached = contentCache[chapter.url] {
+            touchCache(chapter.url)
             content = cached.text
             images = cached.images
             state = .loaded
@@ -157,7 +164,7 @@ final class ReaderViewModel: ObservableObject {
 
         // 离线缓存优先：断网也能读
         if let offline = ChapterCache.shared.content(bookId: book.id, chapterUrl: chapter.url) {
-            contentCache[chapter.url] = offline
+            storeCache(chapter.url, offline)
             content = offline.text
             images = offline.images
             state = .loaded
@@ -203,7 +210,7 @@ final class ReaderViewModel: ObservableObject {
                     if self.currentChapter?.url == chapter.url { self.isLoadingContent = false }
                     return
                 }
-                self.contentCache[chapter.url] = result
+                self.storeCache(chapter.url, result)
                 self.content = result.text
                 self.images = result.images
                 self.state = .loaded
@@ -266,6 +273,29 @@ final class ReaderViewModel: ObservableObject {
         isLoadingContent = false
     }
 
+    // MARK: 内存缓存
+
+    /// 写入正文缓存并做条数淘汰（避免长读时内存无限增长）
+    private func storeCache(_ url: String, _ value: ChapterContent) {
+        contentCache[url] = value
+        touchCache(url)
+        while contentCacheOrder.count > contentCacheLimit {
+            let oldest = contentCacheOrder.removeFirst()
+            // 当前章与其邻居不淘汰，否则刚读完就被清掉
+            let keep = Set([currentChapter?.url].compactMap { $0 })
+            if keep.contains(oldest) {
+                contentCacheOrder.append(oldest)
+                break
+            }
+            contentCache[oldest] = nil
+        }
+    }
+
+    private func touchCache(_ url: String) {
+        contentCacheOrder.removeAll { $0 == url }
+        contentCacheOrder.append(url)
+    }
+
     func preloadNeighbors() {
         guard let engine else { return }
         let neighbors = [currentIndex + 1, currentIndex + 2].filter { chapters.indices.contains($0) }
@@ -282,7 +312,7 @@ final class ReaderViewModel: ObservableObject {
                 if let result = try? await engine.content(
                     chapterUrl: chapter.url, bookInfo: info, chapterInfo: chapterInfo, chapterTitle: chapter.title
                 ) {
-                    self.contentCache[chapter.url] = result
+                    self.storeCache(chapter.url, result)
                 }
             }
         }
@@ -331,6 +361,7 @@ final class ReaderViewModel: ObservableObject {
         ChapterCache.shared.cancel()
         ChapterCache.shared.remove(bookId: book.id)
         contentCache.removeAll()
+        contentCacheOrder.removeAll()
         cachedChapterCount = 0
         cacheProgress = ChapterCache.Progress()
     }
