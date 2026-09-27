@@ -37,6 +37,13 @@ final class AppState: ObservableObject {
     func openReader(_ book: ShelfBook) {
         readingBook = book
     }
+
+    /// 把所有待写数据刷到磁盘（进入后台 / 退出时调用）
+    func flushPendingWrites() {
+        sources.flushPendingWrites()
+        rss.flushPendingWrites()
+        shelf.flushPendingWrites()
+    }
 }
 
 /// 阅读与界面设置

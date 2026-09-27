@@ -5,6 +5,9 @@ struct DeXianApp: App {
     @StateObject private var appState = AppState()
     @StateObject private var webAuth = WebAuthPresenter.shared
 
+    /// 用于在进入后台时把待写数据落盘
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -15,6 +18,11 @@ struct DeXianApp: App {
                 .environmentObject(appState.settings)
                 .preferredColorScheme(appState.settings.appearance.colorScheme)
                 .tint(Theme.Palette.brand)
+                // 写盘有 300ms 合并窗口；被挂起前必须刷一次，否则改动会丢
+                .onChange(of: scenePhase) { phase in
+                    guard phase != .active else { return }
+                    appState.flushPendingWrites()
+                }
                 // 书源需要用户过验证 / 登录时弹出网页
                 .sheet(item: $webAuth.request) { request in
                     WebAuthView(request: request, presenter: webAuth)
