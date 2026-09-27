@@ -1,6 +1,16 @@
 import Foundation
 import Combine
 
+/// 书架持久化快照。
+///
+/// 刻意放在文件作用域而不是嵌在 `ShelfStore` 里：
+/// 嵌套类型会继承外层的 `@MainActor` 隔离，
+/// 导致它无法在后台线程解码（而书架 JSON 有几十 MB，必须离开主线程）。
+private struct ShelfSnapshot: Codable {
+    var books: [ShelfBook]
+    var groups: [ShelfGroup]
+}
+
 /// 书架仓库
 @MainActor
 final class ShelfStore: ObservableObject {
@@ -9,9 +19,46 @@ final class ShelfStore: ObservableObject {
     @Published private(set) var groups: [ShelfGroup] = []
 
     private let fileName = "shelf.json"
+    /// 异步加载任务：便于测试与外部等待
+    private var loadTask: Task<Void, Never>?
+    /// 写盘任务：合并短时间内的多次改动
+    private var persistTask: Task<Void, Never>?
+    /// 首次加载是否完成
+    @Published private(set) var isLoaded = false
 
     init() {
-        load()
+        startLoading()
+    }
+
+    /// 后台加载书架。
+    ///
+    /// 书架里每本书都内嵌了完整目录（几百到几千章），
+    /// 书多时 JSON 可以到几十 MB。原先在 init 里同步解码，
+    /// 而 ShelfStore 是 AppState 的存储属性、启动即构造，
+    /// 上百 MB 的瞬时内存会让 App 一启动就被系统杀掉。
+    private func startLoading() {
+        let name = fileName
+        loadTask = Task { [weak self] in
+            let snapshot = await Background.run { FileStorage.load(ShelfSnapshot.self, from: name) }
+            guard let self, !Task.isCancelled else { return }
+            var merged = false
+            if let snapshot {
+                // 合并而不是覆盖：加载期间用户可能已经加了书，
+                // 直接赋值会把刚加的那本冲掉。
+                let loadedIds = Set(snapshot.books.map { $0.id })
+                let pending = self.books.filter { !loadedIds.contains($0.id) }
+                if !pending.isEmpty { merged = true }
+                self.books = pending + snapshot.books
+                self.groups = snapshot.groups
+            }
+            self.isLoaded = true
+            if merged { self.persist() }
+        }
+    }
+
+    /// 等待首次加载结束（测试与依赖数据的流程使用）
+    func waitUntilLoaded() async {
+        await loadTask?.value
     }
 
     // MARK: 查询
@@ -42,10 +89,22 @@ final class ShelfStore: ObservableObject {
         }
     }
 
+    /// 立即落盘（App 进入后台时调用），避免 300ms 合并窗口内的改动丢失
+    func flushPendingWrites() {
+        persistTask?.cancel()
+        persistTask = nil
+        let snapshot = ShelfSnapshot(books: books, groups: groups)
+        let name = fileName
+        Task.detached(priority: .utility) {
+            FileStorage.save(snapshot, to: name)
+        }
+    }
+
     // MARK: 写入
 
     @discardableResult
     func add(_ book: ShelfBook) -> Bool {
+        // 加载未完成时不写入，避免稍后回填书架时把刚加的书冲掉
         guard !books.contains(where: { $0.id == book.id }) else { return false }
         books.insert(book, at: 0)
         persist()
@@ -116,19 +175,20 @@ final class ShelfStore: ObservableObject {
 
     // MARK: 持久化
 
-    private struct Snapshot: Codable {
-        var books: [ShelfBook]
-        var groups: [ShelfGroup]
-    }
-
-    private func load() {
-        if let snapshot = FileStorage.load(Snapshot.self, from: fileName) {
-            books = snapshot.books
-            groups = snapshot.groups
-        }
-    }
-
+    /// 写盘：合并 300ms 内的多次改动，并在后台线程编码。
+    ///
+    /// 书架每本书内嵌完整目录，整份 JSON 可能几十 MB。
+    /// 原先在主线程同步编码，翻一章就会卡一下；书多时更明显。
     private func persist() {
-        FileStorage.save(Snapshot(books: books, groups: groups), to: fileName)
+        persistTask?.cancel()
+        let snapshot = ShelfSnapshot(books: books, groups: groups)
+        let name = fileName
+        persistTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await Background.run {
+                FileStorage.save(snapshot, to: name)
+            }
+        }
     }
 }

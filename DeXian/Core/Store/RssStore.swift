@@ -10,13 +10,53 @@ final class RssStore: ObservableObject {
 
     @Published private(set) var sources: [RssSource] = []
     @Published private(set) var groups: [String] = []
+    @Published private(set) var isLoaded = false
 
     private let fileName = "rssSources.json"
     private var indexMap: [String: Int] = [:]
     private var persistTask: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
 
     init() {
-        load()
+        startLoading()
+    }
+
+    /// 后台分块加载。
+    /// 与 SourceStore 同理：启动路径上不能做同步大文件解码，
+    /// 否则一打开就闪退。
+    private func startLoading() {
+        let name = fileName
+        loadTask = Task { [weak self] in
+            let loaded = await Background.run { () -> [RssSource] in
+                guard let list = FileStorage.loadArray(RssSource.self, from: name) else { return [] }
+                var seen = Set<String>()
+                var output: [RssSource] = []
+                output.reserveCapacity(list.count)
+                for source in list where seen.insert(source.id).inserted {
+                    output.append(source)
+                }
+                return output
+            }
+            guard let self, !Task.isCancelled else { return }
+            var merged = false
+            if self.sources.isEmpty {
+                self.sources = loaded
+            } else {
+                let loadedIds = Set(loaded.map { $0.id })
+                let pending = self.sources.filter { !loadedIds.contains($0.id) }
+                if !pending.isEmpty { merged = true }
+                self.sources = pending + loaded
+            }
+            self.isLoaded = true
+            self.rebuildIndex()
+            self.rebuildGroups()
+            if merged { self.persist() }
+        }
+    }
+
+    /// 等待首次加载结束
+    func waitUntilLoaded() async {
+        await loadTask?.value
     }
 
     // MARK: 读取
@@ -30,16 +70,6 @@ final class RssStore: ObservableObject {
     func source(id: String) -> RssSource? {
         guard let offset = indexMap[id], sources.indices.contains(offset) else { return nil }
         return sources[offset]
-    }
-
-    private func load() {
-        if let stored = FileStorage.load([RssSource].self, from: fileName) {
-            // 同上：订阅源列表也按 id 去重，避免 ForEach 重复 id 崩溃。
-            var seen = Set<String>()
-            sources = stored.filter { seen.insert($0.id).inserted }
-            rebuildIndex()
-        }
-        rebuildGroups()
     }
 
     private func rebuildIndex() {
@@ -71,8 +101,19 @@ final class RssStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             await Background.run {
-                FileStorage.save(snapshot, to: name)
+                FileStorage.saveArray(snapshot, to: name)
             }
+        }
+    }
+
+    /// 立即落盘（App 进入后台时调用）
+    func flushPendingWrites() {
+        persistTask?.cancel()
+        persistTask = nil
+        let snapshot = sources
+        let name = fileName
+        Task.detached(priority: .utility) {
+            FileStorage.saveArray(snapshot, to: name)
         }
     }
 
