@@ -47,7 +47,9 @@ struct CoverImage: View {
         guard let url, !url.isEmpty, image == nil else { return }
         // 封面只需按显示尺寸解码：原图动辄 2000x3000，全尺寸解码一张就是几十 MB，
         // 列表里滚几十张必然被系统以内存超限杀掉。
-        let pixel = max(width, height)
+        // 乘上屏幕 scale，解码像素才与真实显示尺寸对齐（否则会糊）。
+        let scale = UIScreen.main.scale > 0 ? UIScreen.main.scale : 2
+        let pixel = max(width, height) * scale
         let loaded = await ImageLoader.shared.image(
             url: url,
             maxPixel: pixel,
@@ -68,12 +70,14 @@ struct CoverImage: View {
 /// 遇到超大图或畸形 PNG 会瞬间申请上百 MB 内存直接 OOM。
 /// 先按目标像素尺寸生成缩略图，内存占用与显示尺寸挂钩。
 enum ImageDecoder {
+    /// - Parameter maxPixel: 目标像素边长（已含屏幕 scale）。
+    ///   刻意不在这里读 UIScreen：解码现在跑在后台线程，
+    ///   访问 UIKit 的 UIScreen.main 是不安全的，交由调用方在主线程算好传入。
     static func downsample(_ data: Data, maxPixel: CGFloat) -> UIImage? {
         guard !data.isEmpty else { return nil }
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
-        let scale = UIScreen.main.scale > 0 ? UIScreen.main.scale : 2
-        let limit = max(1, maxPixel * scale)
+        let limit = max(1, maxPixel)
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -152,11 +156,18 @@ final class ImageCache {
 
 /// 图片加载器：同一地址的并发请求合并成一次网络请求，
 /// 并负责 Referer 兜底与失败负缓存。
-@MainActor
-final class ImageLoader {
+///
+/// 刻意不加 @MainActor：ImageDecoder.downsample 是 CPU 密集操作，
+/// 原先整个类跑在主线程上，漫画一屏十几张原图连续解码就能把主线程占满，
+/// 系统看门狗会直接强杀进程 —— 表现就是「漫画一打就闪退 / 一滑就崩」。
+/// 现在解码在后台线程执行，同时限制并发解码数量，避免瞬间 OOM。
+final class ImageLoader: @unchecked Sendable {
     static let shared = ImageLoader()
 
+    private let lock = NSLock()
     private var running: [String: Task<UIImage?, Never>] = [:]
+    /// 同时解码的图片上限：解码会成倍放大内存，放太多张必然 OOM。
+    private let gate = DecodeGate(limit: 4)
 
     func image(
         url: String,
@@ -170,17 +181,32 @@ final class ImageLoader {
         let key = value + "|" + String(Int(maxPixel))
         if let cached = ImageCache.shared.image(for: key) { return cached }
         if ImageCache.shared.isFailed(key) { return nil }
-        if let task = running[key] { return await task.value }
 
-        let task = Task<UIImage?, Never> {
-            let result = await ImageLoader.fetch(
+        lock.lock()
+        if let existing = running[key] {
+            lock.unlock()
+            return await existing.value
+        }
+        // 用 detached：不能继承调用方的 MainActor 上下文，否则解码又回主线程。
+        let task = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return nil }
+            await self.gate.acquire()
+            let image = await ImageLoader.fetch(
                 url: value, maxPixel: maxPixel, referer: referer, sourceKey: sourceKey
             )
-            return result
+            // 显式释放（不用 defer + Task：那样释放时机不确定，
+            // 会把并发额度一直占着，后面的图全排在门外）。
+            await self.gate.release()
+            return image
         }
         running[key] = task
+        lock.unlock()
+
         let loaded = await task.value
+
+        lock.lock()
         running[key] = nil
+        lock.unlock()
 
         if let loaded {
             ImageCache.shared.store(loaded, for: key)
@@ -225,6 +251,40 @@ final class ImageLoader {
     private static func siteRoot(of value: String) -> String? {
         guard let url = URL(string: value), let scheme = url.scheme, let host = url.host else { return nil }
         return scheme + "://" + host + "/"
+    }
+}
+
+/// 异步信号量：限制同时解码的图片数量。
+///
+/// 不能直接用 DispatchSemaphore：它在异步上下文里等待会占住线程，
+/// 并发数一高就把协作线程池堵死（后面所有 Task 都拿不到线程）。
+actor DecodeGate {
+    private let limit: Int
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = max(1, limit) }
+
+    func acquire() async {
+        if active < limit {
+            active += 1
+            return
+        }
+        // 满了就排队；名额由 release 直接转交，这里不再自增，
+        // 否则「先释放再等待者自增」的空档里会有新的调用挤进来，超出上限。
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if let next = waiters.first {
+            waiters.removeFirst()
+            // 名额直接转交给排队者，active 保持不变
+            next.resume()
+            return
+        }
+        active = max(0, active - 1)
     }
 }
 
