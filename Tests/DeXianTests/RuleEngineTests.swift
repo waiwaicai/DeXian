@@ -944,4 +944,93 @@ final class RssTests: XCTestCase {
         XCTAssertNotEqual(a.id, b.id)
         XCTAssertEqual(updated.ruleArticles, ".new")
     }
+
+    // MARK: 本轮加固回归
+
+    /// 空地址的书不能撞 id：SearchBook.id 若只由「源+地址」组成，
+    /// 多本空地址书 id 相同，SwiftUI 的 ForEach 会直接 fatalError 崩溃。
+    func testSearchBookIDsStayUniqueForEmptyURLs() {
+        let first = SearchBook(name: "书甲", author: "作者一", kind: nil, wordCount: nil,
+                               lastChapter: nil, intro: nil, coverUrl: nil, bookUrl: "",
+                               origin: "s1", originName: "源一", type: .text)
+        let second = SearchBook(name: "书乙", author: "作者二", kind: nil, wordCount: nil,
+                                lastChapter: nil, intro: nil, coverUrl: nil, bookUrl: "",
+                                origin: "s1", originName: "源一", type: .text)
+        XCTAssertNotEqual(first.id, second.id)
+    }
+
+    /// 同一本书重复出现在结果里时 id 必须稳定（用于去重）
+    func testSearchBookIDIsStable() {
+        let first = SearchBook(name: "书甲", author: "作者一", kind: nil, wordCount: nil,
+                               lastChapter: nil, intro: nil, coverUrl: nil, bookUrl: "https://a.com/1",
+                               origin: "s1", originName: "源一", type: .text)
+        let second = SearchBook(name: "书甲", author: "作者一", kind: nil, wordCount: nil,
+                                lastChapter: nil, intro: nil, coverUrl: nil, bookUrl: "https://a.com/1",
+                                origin: "s1", originName: "源一", type: .text)
+        XCTAssertEqual(first.id, second.id)
+    }
+
+    /// 正文节点要保留段落：块级标签之间必须有换行，否则整章被压成一行
+    func testParagraphStringsKeepLineBreaks() {
+        let html = "<div class=\"content\"><p>第一段</p><p>第二段</p></div>"
+        let analyzer = AnalyzeRule(context: RuleContext(content: html, baseUrl: "https://a.com"))
+        analyzer.paragraphs = true
+        let text = analyzer.string(".content")
+        XCTAssertTrue(text.contains("\n"), "段落之间应保留换行，实际为：" + text)
+        XCTAssertTrue(text.contains("第一段"))
+        XCTAssertTrue(text.contains("第二段"))
+    }
+
+    /// 段落模式不影响短字段：书名里不应混进换行
+    func testShortFieldsKeepSingleLine() {
+        let html = "<h3 class=\"name\"><a href=\"/1\">斗破<br>苍穹</a></h3>"
+        let analyzer = AnalyzeRule(context: RuleContext(content: html, baseUrl: "https://a.com"))
+        let name = analyzer.string(".name")
+        XCTAssertFalse(name.contains("\n"))
+    }
+
+    /// 中文地址要能直接请求：不编码时 URL(string:) 返回 nil，整章图片全挂
+    func testChineseImageURLIsEncoded() {
+        let raw = "https://img.example.com/漫画/第1话/001.jpg"
+        let resolved = RuleUtil.absoluteURL(raw, base: "https://img.example.com")
+        XCTAssertNotNil(URL(string: resolved), "编码后应能构造 URL：" + resolved)
+    }
+
+    /// 已编码地址不能被二次编码
+    func testEncodedURLIsNotDoubleEncoded() {
+        let raw = "https://img.example.com/a%20b/001.jpg"
+        let resolved = RuleUtil.absoluteURL(raw, base: nil)
+        XCTAssertEqual(resolved, raw)
+    }
+
+    /// UTF-8 有坏字节时不能整体退化成乱码；合法 UTF-8 必须原样还原
+    func testCharsetPrefersValidUTF8() {
+        let text = "第一章 山边小村"
+        let data = Data(text.utf8)
+        XCTAssertTrue(Charset.isValidUTF8(data))
+        XCTAssertEqual(Charset.decode(data), text)
+    }
+
+    /// GBK 正文按 meta 声明正确解码，而不是变成乱码
+    func testCharsetDecodesGBKContent() {
+        let source = "第一章 山边小村"
+        guard let gbk = Charset.encoding(named: "gb18030"),
+              let data = source.data(using: gbk) else {
+            return XCTFail("GB18030 编码不可用")
+        }
+        XCTAssertFalse(Charset.isValidUTF8(data))
+        let html = "<html><head><meta charset=\"gbk\"></head><body>" + source + "</body></html>"
+        guard let htmlData = html.data(using: .isoLatin1) else { return XCTFail("构造失败") }
+        let decoded = Charset.decode(htmlData)
+        XCTAssertTrue(decoded.contains(source), "GBK 页面解码结果： " + decoded)
+    }
+
+    /// 解码结果里不应残留成片的替换字符
+    func testCharsetRemovesReplacementCharacters() {
+        var data = Data("正常文本".utf8)
+        data.append(contentsOf: [0xFF, 0xFE, 0xFD])
+        let decoded = Charset.decode(data)
+        XCTAssertFalse(decoded.contains("\u{FFFD}"))
+    }
+
 }
