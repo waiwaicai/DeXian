@@ -178,7 +178,10 @@ final class ExploreViewModel: ObservableObject {
         if parsed.isEmpty, !raw.isEmpty, !raw.hasPrefix("[") {
             parsed = [ExploreCategory(dict: ["title": "全部", "url": raw])]
         }
-        categories = parsed
+        // 分类去重：上报的书源里同一分类偶尔重复出现，
+        // SwiftUI 的 ForEach 遇到重复 id 会直接 fatalError 崩溃。
+        var seenCategory = Set<String>()
+        categories = parsed.filter { seenCategory.insert($0.id).inserted }
         books = []
         errorMessage = nil
         isFinished = false
