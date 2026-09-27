@@ -181,6 +181,36 @@ xcodegen 生成工程 → 跑单元测试（**失败不阻断出包**）→ `mak
 - 列表分页渲染：首屏 `renderLimit = 120`，滚到底自动追加 `pageSize` 条，几千条书源也不会一次性建视图
 - 搜索过滤结果与分组计数放进 `filteredCache` / `groupCounts` 缓存，只在数据或关键字变化时 `refreshFiltered()`，避免每次 body 重算都遍历全量
 
+**5. 列表身份唯一（防 ForEach 崩溃）**
+SwiftUI 的 `ForEach` 只要遇到重复 id 就会 `fatalError` 直接终止进程。书源数据完全来自第三方，必须处处兜住：
+- `SourceStore.load()` / `RssStore.load()` / `SourceImporter.merge()` 入库前按 id 去重
+- 书源 / 订阅源列表渲染前再按 id 去重一次
+- `ShelfBook.identifier` 对**空地址**的 api 书源补上书名+作者，否则所有书算同一条
+
+**6. DOM 深度上限（防栈溢出）**
+真实网页里成千上万个未闭合的 `<div>`（广告位、残缺模板）会把 DOM 堆到上万层，
+之后任何递归遍历（`outerHTML` / `rawText` / `textWithBreaks`）都会栈溢出闪退。
+`HTMLParser.maxDepth = 256`，超限的子树留在当前栈顶（并对结束标签单独结算），
+既保证深度有界，又不会丢内容、不会弹掉祖先树。
+
+**7. 图片解码离开主线程（防看门狗强杀）**
+`ImageDecoder.downsample` 是 CPU 密集操作。原先 `ImageLoader` 标了 `@MainActor`，
+漫画一屏十几张原图连续解码就把主线程占满，系统看门狗直接杀进程 —— 表现就是
+「漫画一打开就闪退 / 一滑就崩」。现在改为 `Task.detached` 后台解码，
+并用 `actor DecodeGate` 限制同时解码数为 4，避免瞬间 OOM。
+
+**8. 并发安全**
+- `SourceEngine.headers` 由 `lazy var` 改为加锁的一次性初始化（阅读预取后两章会并发访问同一引擎）
+- `audioCache` 读写加锁
+
+**9. 单源超时不再拖住整轮搜索**
+原先用 `withTaskGroup` 实现超时，任务组返回前必须等所有子任务结束；
+而某些书源的 JS 会阻塞在同步网络回调里（`java.ajax` / `startBrowserAwait`），
+取消并不能打断它，滑动窗口因此卡死，后面的源永远轮不到。
+现在改成「谁先到就用谁」，超时立即返回，落后的任务自行在后台收尾。
+
+---
+
 配合 `Background.run` 与 `@MainActor` 标注，所有 UI 状态更新都回到主线程，后台解析完再一次性刷新。
 
 ---
