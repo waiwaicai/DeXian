@@ -195,16 +195,17 @@ enum LegacySelector {
     }
 
     /// 包含根节点自身在内的全部元素。
+    ///
+    /// 用 visited 去重：解析异常的页面（或书源规则自建节点）一旦出现环，
+    /// 无脑展开会无限循环直到内存耗尽被系统强杀。
     private static func allElements(in root: HTMLNode) -> [HTMLNode] {
         var result: [HTMLNode] = []
+        var visited = Set<ObjectIdentifier>()
         var stack: [HTMLNode] = [root]
         while let node = stack.popLast() {
+            guard visited.insert(ObjectIdentifier(node)).inserted else { continue }
             if node.isElement { result.append(node) }
             stack.append(contentsOf: node.children.reversed())
-        }
-        if root.isElement {
-            // 深度优先顺序已天然满足；root 已在结果里
-            return result
         }
         return result
     }
