@@ -91,7 +91,7 @@ final class ReaderViewModel: ObservableObject {
             shelf.updateChapters(bookId: book.id, chapters: list)
             shelf.updateVariables(bookId: book.id, variables: engine.variableSnapshot)
         } catch {
-            state = .failed(error.localizedDescription)
+            state = .failed(SourceError.describe(error))
         }
     }
 
@@ -203,7 +203,7 @@ final class ReaderViewModel: ObservableObject {
                 )
             } catch {
                 if Task.isCancelled { return }
-                self.state = .failed(error.localizedDescription)
+                self.state = .failed(SourceError.describe(error))
                 self.isLoadingContent = false
             }
         }
@@ -239,7 +239,7 @@ final class ReaderViewModel: ObservableObject {
             )
         } catch {
             audioUrl = ""
-            state = .failed(error.localizedDescription)
+            state = .failed(SourceError.describe(error))
         }
         isLoadingContent = false
     }
