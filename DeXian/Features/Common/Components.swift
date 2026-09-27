@@ -188,16 +188,10 @@ final class ImageLoader: @unchecked Sendable {
             return await existing.value
         }
         // 用 detached：不能继承调用方的 MainActor 上下文，否则解码又回主线程。
-        let task = Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return nil }
-            await self.gate.acquire()
-            let image = await ImageLoader.fetch(
+        let task: Task<UIImage?, Never> = Task.detached(priority: .utility) {
+            await ImageLoader.decode(
                 url: value, maxPixel: maxPixel, referer: referer, sourceKey: sourceKey
             )
-            // 显式释放（不用 defer + Task：那样释放时机不确定，
-            // 会把并发额度一直占着，后面的图全排在门外）。
-            await self.gate.release()
-            return image
         }
         running[key] = task
         lock.unlock()
@@ -214,6 +208,23 @@ final class ImageLoader: @unchecked Sendable {
             ImageCache.shared.markFailed(key)
         }
         return loaded
+    }
+
+    /// 受并发闸门保护的一次解码：acquire → fetch → release。
+    /// 这里显式 release 而不用 defer + Task：defer 里起 Task 释放时机不确定，
+    /// 会把并发额度一直占着，后面的图全排在门外。
+    private static func decode(
+        url: String,
+        maxPixel: CGFloat,
+        referer: String,
+        sourceKey: String?
+    ) async -> UIImage? {
+        await shared.gate.acquire()
+        let image = await fetch(
+            url: url, maxPixel: maxPixel, referer: referer, sourceKey: sourceKey
+        )
+        await shared.gate.release()
+        return image
     }
 
     /// 依次尝试「章节页 Referer → 站点根 Referer」，
