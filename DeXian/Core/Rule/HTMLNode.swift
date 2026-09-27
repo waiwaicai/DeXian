@@ -205,6 +205,9 @@ final class HTMLNode {
 /// 处理：未闭合标签、void 元素、隐式闭合（p/li/td/tr 等）、
 /// script/style 原始文本、注释、属性引号缺省。
 enum HTMLParser {
+    /// DOM 最大嵌套深度。超过后不再继续下钻，避免递归遍历栈溢出。
+    static let maxDepth = 256
+
     static func parse(_ html: String) -> HTMLNode {
         let root = HTMLNode(kind: .document)
         var stack: [HTMLNode] = [root]
@@ -213,6 +216,11 @@ enum HTMLParser {
         var index = 0
 
         var pendingText = ""
+        // 因超过 maxDepth 而未入栈的标签名（按遇到顺序）。
+        // 这些标签的子树直接挂在当前栈顶，深度因此有界；
+        // 记录它们是为了让「结束标签」不要去弹真正的祖先，
+        // 否则 <div> 嵌套超限时一个 </div> 会把整棵祖先树弹掉。
+        var overflowTags: [String] = []
         func flushText() {
             guard !pendingText.isEmpty else { return }
             let node = HTMLNode(kind: .text, text: decodeEntities(pendingText))
@@ -259,7 +267,13 @@ enum HTMLParser {
                     }
                     while cursor < count, characters[cursor] != ">" { cursor += 1 }
                     index = min(cursor + 1, count)
-                    closeTag(name.lowercased(), stack: &stack)
+                    let closing = name.lowercased()
+                    if let position = overflowTags.lastIndex(of: closing) {
+                        // 属于被跳过的子树，只结算 overflow 记录
+                        overflowTags.removeSubrange(position..<overflowTags.count)
+                    } else {
+                        closeTag(closing, stack: &stack)
+                    }
                     continue
                 }
                 if index + 1 < count, isNameStart(characters[index + 1]) {
@@ -329,6 +343,16 @@ enum HTMLParser {
                     stack[stack.count - 1].append(node)
 
                     if HTMLNode.voidTags.contains(tagName) || selfClosing {
+                        continue
+                    }
+                    // 深度上限：真实网页里成千上万个未闭合的 <div>（广告位、
+                    // 模板残缺）会把 DOM 堆到上万层，之后任何递归遍历
+                    // （outerHTML / rawText / textWithBreaks）都会栈溢出闪退。
+                    // 浏览器解析栈同样有上限，这里对齐成 256 层，超出即当作兄弟节点。
+                    if stack.count >= HTMLParser.maxDepth {
+                        // 不再入栈：子树留在当前栈顶，深度有界；
+                        // 记下标签名，好让对应的结束标签被正确抵消。
+                        overflowTags.append(tagName)
                         continue
                     }
                     if tagName == "script" || tagName == "style" {
