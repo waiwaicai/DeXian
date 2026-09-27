@@ -46,6 +46,13 @@ final class ReaderViewModel: ObservableObject {
         chapters = book.chapters
         currentIndex = book.lastReadChapterIndex
         cachedChapterCount = ChapterCache.shared.counts(bookId: book.id).cached
+        // meta 读取放后台：原先 init 里同步读 meta.json，
+        // 书架每本书都会各读一次，书多时启动路径又变成一串主线程 IO
+        Task { [weak self] in
+            await ChapterCache.shared.loadMeta(bookId: book.id)
+            guard let self else { return }
+            self.cachedChapterCount = ChapterCache.shared.counts(bookId: self.book.id).cached
+        }
         // 缓存由单例驱动，进度变化时同步到界面
         cacheObserver = ChapterCache.shared.$progress
             .receive(on: DispatchQueue.main)
@@ -162,8 +169,8 @@ final class ReaderViewModel: ObservableObject {
             return
         }
 
-        // 离线缓存优先：断网也能读
-        if let offline = ChapterCache.shared.content(bookId: book.id, chapterUrl: chapter.url) {
+        // 离线缓存优先：断网也能读（磁盘读取在后台线程）
+        if let offline = await ChapterCache.shared.content(bookId: book.id, chapterUrl: chapter.url) {
             storeCache(chapter.url, offline)
             content = offline.text
             images = offline.images
@@ -171,6 +178,8 @@ final class ReaderViewModel: ObservableObject {
             isLoadingContent = false
             return
         }
+
+        await ChapterCache.shared.loadMeta(bookId: book.id)
 
         isLoadingContent = true
         content = ""
@@ -214,7 +223,7 @@ final class ReaderViewModel: ObservableObject {
                 self.content = result.text
                 self.images = result.images
                 self.state = .loaded
-                ChapterCache.shared.store(
+                await ChapterCache.shared.store(
                     bookId: self.book.id,
                     name: self.book.name,
                     origin: self.book.origin,
@@ -334,7 +343,7 @@ final class ReaderViewModel: ObservableObject {
     }
 
     /// 下载整本（已缓存的章节自动跳过）
-    func cacheAll() {
+    func cacheAll() async {
         guard let engine else {
             state = .failed("书源缺失，无法缓存")
             return
@@ -343,6 +352,9 @@ final class ReaderViewModel: ObservableObject {
             ChapterCache.shared.cancel()
             return
         }
+        // 与详情页同理：isCached 只读内存里的 meta，
+        // 不先读进来，「已缓存」会全判成未缓存，整本白下一遍。
+        await ChapterCache.shared.loadMeta(bookId: book.id)
         ChapterCache.shared.onVariableChange = { [weak self] snapshot in
             guard let self else { return }
             self.shelf.updateVariables(bookId: self.book.id, variables: snapshot)

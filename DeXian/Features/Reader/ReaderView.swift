@@ -62,7 +62,14 @@ struct ReaderView: View {
         // 导航栏显隐会改变顶部安全区，正文被迫重排 ——
         // 用户看到的就是「一弹出顶部框，字的排序和大小全变了」。
         // 自绘浮层不参与布局，显隐都不影响正文。
-        .overlay { chromeOverlay }
+        // 顶部与底部拆成两个「贴边」浮层，而不是一个铺满全屏的 VStack。
+        // 后者中间那个 Spacer 会占满整块屏幕，读者在正文上拖动时
+        // 命中判定落到浮层上，滚动直接被吃掉 ——
+        // 这正是「点开小说页面无法上下滑动」的成因。
+        // 拆开后浮层只剩上下两条，中间区域完全交还给正文。
+        .overlay(alignment: .top) { topChrome }
+        .overlay(alignment: .bottom) { bottomChrome }
+        .animation(.easeOut(duration: 0.2), value: showChrome)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         // 工具条自动隐藏：显示后 4 秒无操作自动收起
@@ -238,10 +245,14 @@ struct ReaderView: View {
 
     // MARK: 自绘浮层（顶部 + 底部）
 
-    private var chromeOverlay: some View {
+    @ViewBuilder
+    private var topChrome: some View {
+        if showChrome { topBar }
+    }
+
+    @ViewBuilder
+    private var bottomChrome: some View {
         VStack(spacing: 0) {
-            if showChrome { topBar }
-            Spacer(minLength: 0)
             if showChrome {
                 cacheProgressBar
                 bottomBar
@@ -250,7 +261,6 @@ struct ReaderView: View {
                 comicBadge
             }
         }
-        .animation(.easeOut(duration: 0.2), value: showChrome)
     }
 
     /// 自绘顶栏：返回 + 章节标题 + 进度 + 更多菜单。
@@ -308,7 +318,7 @@ struct ReaderView: View {
             }
 
             Button {
-                viewModel.cacheAll()
+                Task { await viewModel.cacheAll() }
             } label: {
                 Label(viewModel.cacheAllText,
                       systemImage: viewModel.isCachingAll ? "stop.circle" : "arrow.down.circle")
@@ -597,12 +607,20 @@ struct PagedReaderView: View {
         }
         .task(id: layoutKey) { await repaginate() }
         .contentShape(Rectangle())
-        // 拖动翻页：与左右轻点并存，翻页模式下手感接近原生阅读器
-        .gesture(
-            DragGesture(minimumDistance: 24)
+        // 翻页手势统一走 simultaneousGesture。
+        //
+        // 原先横滑用 .gesture(...)：它在 SwiftUI 里是**高优先级**手势，
+        // 会把轻点与系统返回手势一起压掉，并且和上下滚动互相抢事件，
+        // 结果就是「翻页动画都不能动、页面也滑不动」。
+        // 现在横滑与轻点都作为并行手势，只判断位移方向，互不吞事件：
+        // 横向位移足够就翻页，纵向为主就交还给外层滚动。
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 18)
                 .onEnded { value in
                     let dx = value.translation.width
-                    guard abs(dx) > 40 else { return }
+                    let dy = value.translation.height
+                    // 纵向为主：这次拖动是滚动正文，不要当成翻页
+                    guard abs(dx) > abs(dy) * 1.6, abs(dx) > 48 else { return }
                     if dx < 0 { turnForward() } else { turnBackward() }
                 }
         )
@@ -787,12 +805,15 @@ struct PagedReaderView: View {
         }
     }
 
-    /// 无动画模式下直接改状态，其余模式包一层动画
+    /// 无动画模式下直接改状态，其余模式包一层动画。
+    ///
+    /// 时长放到 0.28s 并把曲线换成 easeInOut：0.22s 的 easeOut
+    /// 太短，页面还没移出屏幕就结束了，肉眼看着像「动画没生效」。
     private func advance(_ change: () -> Void) {
         if settings.pageTurn == .none {
             change()
         } else {
-            withAnimation(.easeOut(duration: 0.22)) { change() }
+            withAnimation(.easeInOut(duration: 0.28)) { change() }
         }
     }
 
