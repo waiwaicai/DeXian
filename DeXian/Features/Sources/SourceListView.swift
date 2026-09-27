@@ -27,7 +27,9 @@ struct SourceListView: View {
         ZStack {
             Theme.ColorToken.background.ignoresSafeArea()
 
-            if sources.sources.isEmpty {
+            if !sources.isLoaded {
+                VStack { Spacer(); LoadingView(text: "正在加载书源"); Spacer() }
+            } else if sources.sources.isEmpty {
                 EmptyStateView(
                     systemImage: "server.rack",
                     title: "还没有书源",
