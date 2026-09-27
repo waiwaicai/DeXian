@@ -72,6 +72,10 @@ final class HTTPClient {
             base: base
         )
         let (data, response) = try await session.data(for: request)
+        try Self.checkDeclaredSize(response)
+        guard data.count <= Self.maxResponseBytes else {
+            throw NetworkError.responseTooLarge(data.count)
+        }
         return try Self.decode(data: data, response: response, options: options, sourceKey: sourceKey)
     }
 
@@ -115,6 +119,21 @@ final class HTTPClient {
             }
         }
         return request
+    }
+
+    /// 单个响应体的硬上限。
+    ///
+    /// 正常书源页面在几百 KB 量级，64MB 已经远超任何真实网页。
+    /// 设这道闸门是为了挡住「服务端声明了一个超大 Content-Length」的情况：
+    /// 那种响应一旦真的收下来，内存会被瞬间吃掉，进程直接被系统杀掉 ——
+    /// 表现就是「点开某本书就闪退」，而且完全没有崩溃报告可查。
+    static let maxResponseBytes = 64 * 1024 * 1024
+
+    /// 声明体积就超限的响应：直接放弃，不必先把数据收进内存。
+    static func checkDeclaredSize(_ response: URLResponse) throws {
+        let declared = response.expectedContentLength
+        guard declared > Int64(maxResponseBytes) else { return }
+        throw NetworkError.responseTooLarge(Int(declared))
     }
 
     /// 把 URLSession 的响应整理成 HTTPResponse（异步 / 同步共用）
@@ -188,6 +207,9 @@ final class HTTPClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NetworkError.invalidResponse
         }
+        // 图片同样要有上限：漫画图床偶尔返回一整张超大原图，
+        // 收进内存后还没等到解码就已经被系统回收了。
+        try Self.checkDeclaredSize(httpResponse)
         if let sourceKey {
             CookieJar.shared.store(response: httpResponse, sourceKey: sourceKey)
         }
@@ -323,6 +345,7 @@ enum NetworkError: LocalizedError {
     case emptyContent
     case httpStatus(Int)
     case timeout
+    case responseTooLarge(Int)
 
     var errorDescription: String? {
         switch self {
@@ -331,6 +354,8 @@ enum NetworkError: LocalizedError {
         case .emptyContent: return "内容为空"
         case .httpStatus(let code): return "请求失败（HTTP " + String(code) + "）"
         case .timeout: return "请求超时"
+        case .responseTooLarge(let bytes):
+            return "内容过大（" + String(bytes / 1024 / 1024) + "MB），已中止"
         }
     }
 }
