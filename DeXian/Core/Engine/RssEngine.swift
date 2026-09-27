@@ -277,7 +277,7 @@ struct RssPage {
 
 /// 订阅源里的一篇文章
 struct RssArticle: Codable, Hashable, Identifiable {
-    var id: String { link + "|" + title }
+    var id: String { link + "|" + title + "|" + origin }
     var title: String
     var link: String
     var pubDate: String
