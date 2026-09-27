@@ -14,6 +14,16 @@ final class SourceEngine {
     /// 音频书源解析出的直链缓存，按章节地址区分（音源通常只返回一次）
     private var audioCache: [String: String] = [:]
 
+    /// 取页面 / 请求用的兜底 JS 引擎。
+    ///
+    /// 正常路径下调用方都会把自己已经建好的引擎传进来（见 fetchContent 的 js 参数），
+    /// 一本漫画翻几十页只用一个 JSVirtualMachine。原先每一步都新建一个，
+    /// 几十页就能堆出几十个虚拟机，是「一直加载中然后闪退」的主要内存来源。
+    /// 这里只在调用方没传时才现建，保证兼容性。
+    private func makePlumbingJS() -> JSEngine {
+        makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+    }
+
     init(source: BookSource, variables: [String: String] = [:]) {
         self.source = source
         self.variables = VariableStore(variables)
@@ -48,7 +58,8 @@ final class SourceEngine {
             urlString: urlString,
             options: request.options,
             page: page,
-            keyword: keyword
+            keyword: keyword,
+            js: js
         )
         let listAnalyzer = makeAnalyzer(content: response.text, baseUrl: urlString, js: js)
         listAnalyzer.page = page
@@ -78,13 +89,15 @@ final class SourceEngine {
         var options = parsed.options
         options.method = options.method.isEmpty ? "GET" : options.method
 
-        let content = try await fetchContent(urlString: parsed.url, options: options, page: page, keyword: "")
+        let content = try await fetchContent(urlString: parsed.url, options: options, page: page, keyword: "", js: js)
 
         let listAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         listAnalyzer.page = page
-        let items = listAnalyzer.listItems(source.exploreRule.bookList)
+        // 发现规则缺省时回退到搜索规则，避免 bookList 为空导致整页没内容
+        let exploreRule = source.exploreRule.merged(with: source.searchRule)
+        let items = listAnalyzer.listItems(exploreRule.bookList)
         let books = items.compactMap { item in
-            buildSearchBook(item: item, rule: source.exploreRule.asSearchRule, baseUrl: parsed.url, js: js, page: page, keyword: "")
+            buildSearchBook(item: item, rule: exploreRule, baseUrl: parsed.url, js: js, page: page, keyword: "")
         }
         return dedupe(books)
     }
@@ -103,7 +116,7 @@ final class SourceEngine {
             target = js.evaluateString(body)
         }
 
-        let content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "")
+        let content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "", js: js)
         let document = HTMLParser.parse(content)
 
         // init 规则可改写内容
@@ -138,7 +151,7 @@ final class SourceEngine {
         let analyzer = makeAnalyzer(content: nil, baseUrl: tocUrl, js: js)
         var target = analyzer.interpolate(tocUrl)
 
-        var content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "")
+        var content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "", js: js)
         var listAnalyzer = makeAnalyzer(content: content, baseUrl: target, js: js)
         var items = listAnalyzer.listItems(source.tocRule.chapterList)
 
@@ -168,7 +181,7 @@ final class SourceEngine {
         while !nextURL.isEmpty, pageCount < 20 {
             pageCount += 1
             let resolvedNext = RuleUtil.absoluteURL(analyzer.interpolate(nextURL), base: target)
-            guard let nextContent = try? await fetchContent(urlString: resolvedNext, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "") else { break }
+            guard let nextContent = try? await fetchContent(urlString: resolvedNext, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "", js: js) else { break }
             let nextAnalyzer = makeAnalyzer(content: nextContent, baseUrl: resolvedNext, js: js)
             let nextItems = nextAnalyzer.listItems(source.tocRule.chapterList)
             if nextItems.isEmpty { break }
@@ -214,7 +227,7 @@ final class SourceEngine {
         }
 
         let parsed = HTTPClient.parseURLRule(target)
-        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
+        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
 
         // baseUrl 对齐当前页面地址，页面匹配类脚本（baseUrl.match(...)）才正确
         js.host.baseUrl = parsed.url
@@ -236,7 +249,7 @@ final class SourceEngine {
         while !nextURLString.isEmpty, pageCount < 10 {
             pageCount += 1
             let nextURL = RuleUtil.absoluteURL(analyzer.interpolate(nextURLString), base: parsed.url)
-            guard let nextContent = try? await fetchContent(urlString: nextURL, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "") else { break }
+            guard let nextContent = try? await fetchContent(urlString: nextURL, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "", js: js) else { break }
             let nextAnalyzer = makeAnalyzer(content: nextContent, baseUrl: nextURL, js: js)
             nextAnalyzer.paragraphs = true
             let nextText = nextAnalyzer.string(source.contentRule.content)
@@ -259,6 +272,25 @@ final class SourceEngine {
         // 正文净化
         text = cleanContent(text)
         images = dedupeImages(images)
+
+        // 漫画源兜底：正文规则取不到文字、也没解析到图片时，
+        // 改成按图片规则（含 <js> 组装的链接数组）再抓一遍。
+        // 原先 comicImages() 定义了却没有任何地方调用，
+        // 结果就是「漫画打不开 / 本章没有图片」。
+        if images.isEmpty, text.count < 200 {
+            let comicAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
+            // 有些源把图片规则写在 content 里，另一些单独写在 imageStyle
+            let ruleCandidates = [source.contentRule.content, source.contentRule.imageStyle]
+            for rule in ruleCandidates {
+                guard let rule, !rule.trimmed.isEmpty else { continue }
+                let html = comicAnalyzer.htmlString(rule)
+                let found = extractImages(from: html.isEmpty ? content : html, baseUrl: parsed.url)
+                if !found.isEmpty {
+                    images = dedupeImages(found)
+                    break
+                }
+            }
+        }
 
         return ChapterContent(text: text, images: images, nextChapterUrl: nil).normalized()
     }
@@ -285,7 +317,7 @@ final class SourceEngine {
         }
 
         let parsed = HTTPClient.parseURLRule(target)
-        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
+        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
         js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
 
@@ -332,7 +364,7 @@ final class SourceEngine {
         let target = analyzer.interpolate(chapterUrl)
         let parsed = HTTPClient.parseURLRule(target)
 
-        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "")
+        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
         js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         var value = contentAnalyzer.string(source.contentRule.content)
@@ -346,7 +378,7 @@ final class SourceEngine {
         while !nextURLString.isEmpty, pageCount < 10 {
             pageCount += 1
             let nextURL = RuleUtil.absoluteURL(analyzer.interpolate(nextURLString), base: parsed.url)
-            guard let nextContent = try? await fetchContent(urlString: nextURL, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "") else { break }
+            guard let nextContent = try? await fetchContent(urlString: nextURL, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "", js: js) else { break }
             let nextAnalyzer = makeAnalyzer(content: nextContent, baseUrl: nextURL, js: js)
             let nextValue = nextAnalyzer.string(source.contentRule.content)
             images.append(contentsOf: extractImages(from: nextValue.isEmpty ? nextContent : nextValue, baseUrl: nextURL))
@@ -363,10 +395,13 @@ final class SourceEngine {
         urlString: String,
         options incomingOptions: HTTPRequestOptions,
         page: Int,
-        keyword: String
+        keyword: String,
+        js incomingJS: JSEngine? = nil
     ) async throws -> String {
         guard !urlString.isEmpty else { throw SourceError.emptyURL }
-        let js = makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+        // 复用调用方已经建好的引擎：原先每翻一页都新建一个 JSVirtualMachine，
+        // 漫画翻几十页就会堆出几十个虚拟机，内存被顶爆后闪退。
+        let js = incomingJS ?? makePlumbingJS()
         js.page = page
         js.key = keyword
 
@@ -427,10 +462,11 @@ final class SourceEngine {
         urlString: String,
         options: HTTPRequestOptions,
         page: Int,
-        keyword: String
+        keyword: String,
+        js incomingJS: JSEngine? = nil
     ) async throws -> HTTPResponse {
         guard !urlString.isEmpty else { throw SourceError.emptyURL }
-        let js = makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+        let js = incomingJS ?? makePlumbingJS()
         js.key = keyword
         js.page = page
         let analyzer = makeAnalyzer(content: nil, baseUrl: source.url, js: js)
@@ -684,8 +720,42 @@ final class SourceEngine {
 
     // MARK: 正文清洗
 
+    /// 去掉正文里的 HTML 残留。
+    ///
+    /// 大量书源的正文规则是 @js 脚本，直接返回 innerHTML 字符串，
+    /// 这些标签会原样显示成「<br/><br/>」「<script>read2();</script>」，
+    /// 阅读时又乱又没法看。这里把块级标签与 <br> 还原成换行，
+    /// 其余标签剥掉，最后解码 HTML 实体。
+    static func stripHTMLArtifacts(_ text: String) -> String {
+        guard text.contains("<") || text.contains("&") else { return text }
+        var value = text
+
+        // script / style 整块丢弃（先处理成对出现的）
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<script[^>]*>.*?</script\\s*>", replacement: "")
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<style[^>]*>.*?</style\\s*>", replacement: "")
+        // 未闭合的 script / style：只吃到行尾，避免把整篇正文一起吞掉
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<script[^>]*>[^\\n]*", replacement: "")
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<style[^>]*>[^\\n]*", replacement: "")
+        // 注释与 doctype
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<!--.*?-->", replacement: "")
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<!doctype[^>]*>", replacement: "")
+        // 块级边界还原成换行，段落才不会粘成一行
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<\\s*br\\s*/?\\s*>", replacement: "\\n")
+        value = RuleUtil.regexReplace(
+            value,
+            pattern: "(?i)</?\\s*(p|div|li|h[1-6]|tr|section|article|blockquote|dd|dt|ul|ol|table|figure|pre)\\b[^>]*>",
+            replacement: "\\n"
+        )
+        // 剩下所有标签剥掉
+        value = RuleUtil.regexReplace(value, pattern: "(?i)<[^>]+>", replacement: "")
+        // 实体还原（&nbsp; &amp; &#39; 等）
+        value = HTMLParser.decodeEntities(value)
+        return value
+    }
+
     func cleanContent(_ text: String) -> String {
-        var result = text
+        // 先把 HTML 残留清掉：正文规则返回 innerHTML 时标签会直接进正文
+        var result = SourceEngine.stripHTMLArtifacts(text)
 
         // 应用书源自定义的正文替换规则（Legado 的 替换净化）
         if let replaceRule = source.contentRule.replaceRegex?.nilIfBlank {
@@ -827,6 +897,25 @@ enum SourceError: LocalizedError {
 }
 
 extension ExploreRule {
+    /// 发现规则缺省时回退到搜索规则。
+    ///
+    /// yckceo 上一批源只写了 exploreUrl，列表规则直接复用 ruleSearch。
+    /// 原先发现页只读 ruleExplore，bookList 为空就一条都取不到，
+    /// 表现就是「发现页下面没东西 / 该分类暂无内容」。
+    func merged(with fallback: SearchRule) -> SearchRule {
+        var rule = asSearchRule
+        if rule.bookList?.trimmed.isEmpty ?? true { rule.bookList = fallback.bookList }
+        if rule.name?.trimmed.isEmpty ?? true { rule.name = fallback.name }
+        if rule.author?.trimmed.isEmpty ?? true { rule.author = fallback.author }
+        if rule.kind?.trimmed.isEmpty ?? true { rule.kind = fallback.kind }
+        if rule.wordCount?.trimmed.isEmpty ?? true { rule.wordCount = fallback.wordCount }
+        if rule.lastChapter?.trimmed.isEmpty ?? true { rule.lastChapter = fallback.lastChapter }
+        if rule.intro?.trimmed.isEmpty ?? true { rule.intro = fallback.intro }
+        if rule.coverUrl?.trimmed.isEmpty ?? true { rule.coverUrl = fallback.coverUrl }
+        if rule.bookUrl?.trimmed.isEmpty ?? true { rule.bookUrl = fallback.bookUrl }
+        return rule
+    }
+
     /// 发现规则与搜索规则字段一致，统一转换。
     var asSearchRule: SearchRule {
         var rule = SearchRule()
