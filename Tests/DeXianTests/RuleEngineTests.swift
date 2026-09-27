@@ -1033,4 +1033,58 @@ final class RssTests: XCTestCase {
         XCTAssertFalse(decoded.contains("\u{FFFD}"))
     }
 
+    /// 服务器把 UTF-8 正文标成 gbk 时，不能被声明带偏成乱码
+    func testUTF8WinsOverWrongCharsetHeader() {
+        let text = "第一章 山边小村"
+        let data = Data(text.utf8)
+        // 显式传入错误的 gbk 声明
+        let decoded = Charset.decode(data, preferred: Charset.encoding(named: "gb18030"))
+        XCTAssertEqual(decoded, text, "合法的 UTF-8 不能被 gbk 声明覆盖： " + decoded)
+    }
+
+    /// 正文里混进的 HTML 标签必须清掉，不能当成正文显示
+    func testContentStripsHTMLArtifacts() {
+        let raw = "<script>read2();</script><p>第一段</p><br/><br/><div id=\"tip\">广告</div>第二段&amp;结尾"
+        let cleaned = SourceEngine.stripHTMLArtifacts(raw)
+        XCTAssertFalse(cleaned.contains("<script"), "脚本标签应被移除： " + cleaned)
+        XCTAssertFalse(cleaned.contains("<br"), "<br> 应转成换行： " + cleaned)
+        XCTAssertFalse(cleaned.contains("<div"), "div 标签应被移除： " + cleaned)
+        XCTAssertFalse(cleaned.contains("</"), "不应残留任何闭合标签： " + cleaned)
+        XCTAssertTrue(cleaned.contains("第一段"))
+        XCTAssertTrue(cleaned.contains("第二段"))
+        XCTAssertTrue(cleaned.contains("&"), "实体应被解码为 &： " + cleaned)
+        XCTAssertTrue(cleaned.contains("\n"), "块级标签应产生换行")
+    }
+
+    /// 全是普通文本时不应改动内容
+    func testContentWithoutHTMLIsUnchanged() {
+        let plain = "这是一个没有标签的段落。"
+        XCTAssertEqual(SourceEngine.stripHTMLArtifacts(plain), plain)
+    }
+
+    /// 发现规则缺省时要回退到搜索规则，否则发现页整页空白
+    func testExploreRuleFallsBackToSearchRule() {
+        var search = SearchRule()
+        search.bookList = ".item"
+        search.name = "h3 a@text"
+        search.bookUrl = "h3 a@href"
+        var explore = ExploreRule()
+        explore.bookList = ""
+        explore.name = nil
+        let merged = explore.merged(with: search)
+        XCTAssertEqual(merged.bookList, ".item")
+        XCTAssertEqual(merged.name, "h3 a@text")
+        XCTAssertEqual(merged.bookUrl, "h3 a@href")
+    }
+
+    /// 发现规则自己有值时不能被搜索规则覆盖
+    func testExploreRuleKeepsOwnValues() {
+        var search = SearchRule()
+        search.bookList = ".search-item"
+        var explore = ExploreRule()
+        explore.bookList = ".explore-item"
+        let merged = explore.merged(with: search)
+        XCTAssertEqual(merged.bookList, ".explore-item")
+    }
+
 }
