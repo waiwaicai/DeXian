@@ -138,8 +138,8 @@ struct BookDetailView: View {
                 // 既不知道失败了、也没法重试。这里按真实状态区分。
                 Label(readingButtonTitle, systemImage: readingButtonIcon)
             }
-            .buttonStyle(PrimaryButtonStyle(enabled: !chapters.isEmpty))
-            .disabled(chapters.isEmpty)
+            .buttonStyle(PrimaryButtonStyle(enabled: canStartReading))
+            .disabled(!canStartReading)
 
             Button {
                 cacheAll()
@@ -245,7 +245,7 @@ struct BookDetailView: View {
                           systemImage: "list.bullet.indent")
 
             if chapters.isEmpty {
-                Text(isLoading ? "正在获取目录…" : (errorMessage == nil ? "暂无章节信息" : "目录获取失败，请点上方「重试」"))
+                Text(chapterEmptyHint)
                     .font(.themeCallout)
                     .foregroundStyle(Theme.ColorToken.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -301,11 +301,44 @@ struct BookDetailView: View {
     private var readingButtonTitle: String {
         if !chapters.isEmpty { return "开始阅读" }
         if isLoading { return "正在获取目录" }
+        // 漫画源普遍没有章节目录，整本就是一个阅读页。
+        // 这类书源只要拿得到书籍地址就允许进入，由阅读器做单章兜底。
+        if canReadWithoutToc { return "开始阅读" }
         return "目录获取失败"
     }
 
     private var readingButtonIcon: String {
-        chapters.isEmpty && !isLoading ? "exclamationmark.triangle" : "book.fill"
+        if !chapters.isEmpty { return "book.fill" }
+        if isLoading { return "book.fill" }
+        return canReadWithoutToc ? "book.fill" : "exclamationmark.triangle"
+    }
+
+    /// 漫画源是否可以在没有目录的情况下直接进入阅读。
+    ///
+    /// 不能简单地用「地址非空」放行：小说源目录失败时进去只会看到空白，
+    /// 反倒让人以为软件坏了。这里只对漫画放行 —— 阅读器侧已有
+    /// fallbackToSingleChapter()，会把书籍页本身当成唯一一章解析。
+    private var canReadWithoutToc: Bool {
+        ReaderEntryPolicy.canOpenWithoutToc(
+            type: searchBook.type,
+            tocUrl: info?.tocUrl,
+            bookUrl: searchBook.bookUrl
+        )
+    }
+
+    /// 阅读按钮是否可点。
+    private var canStartReading: Bool {
+        !chapters.isEmpty || canReadWithoutToc
+    }
+
+    /// 章节区的空状态文案。
+    ///
+    /// 漫画源的「没有目录」是正常现象，说成「获取失败」会让人以为软件坏了 ——
+    /// 旧版的闪退投诉里有一半是这一步被误导后反复重试造成的。
+    private var chapterEmptyHint: String {
+        if isLoading { return "正在获取目录…" }
+        if canReadWithoutToc { return "该漫画源无章节目录，直接点上方「开始阅读」即可" }
+        return errorMessage == nil ? "暂无章节信息" : "目录获取失败，请点上方「重试」"
     }
 
     // MARK: 数据
@@ -341,7 +374,10 @@ struct BookDetailView: View {
             chapters = try await engine.toc(tocUrl: tocLink, bookInfo: bookInfoMap(detail))
             errorMessage = nil
         } catch {
-            errorMessage = SourceError.describe(error)
+            // 漫画源普遍不提供章节目录：整本就是一个阅读页。
+            // 这不是错误，不该弹「目录获取失败」把人挡在门外，
+            // 阅读器会在打开时把书籍页当成唯一一章解析。
+            errorMessage = canReadWithoutToc ? nil : SourceError.describe(error)
         }
         isLoading = false
     }
