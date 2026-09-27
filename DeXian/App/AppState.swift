@@ -203,10 +203,18 @@ final class SettingsStore: ObservableObject {
         FileStorage.save(snapshot, to: "settings.json")
     }
 
+    /// 可选字体族。全部使用 iOS 自带字体，无需内置字体文件，
+    /// 因此安装包依然很小，但选到的都是真正的宋体 / 楷体 / 圆体。
+    static let fontFamilies = ["系统", "宋体", "楷体", "圆体", "等宽"]
+
     var readingFont: Font {
         switch fontFamily {
-        case "宋体": return .system(size: fontSize, design: .serif)
+        //「Songti SC」是 iOS 自带的中文宋体
+        case "宋体": return .custom("Songti SC", size: fontSize)
+        //「Kaiti SC」是 iOS 自带的楷体
+        case "楷体": return .custom("Kaiti SC", size: fontSize)
         case "圆体": return .system(size: fontSize, design: .rounded)
+        case "等宽": return .system(size: fontSize, design: .monospaced)
         default: return .system(size: fontSize)
         }
     }
