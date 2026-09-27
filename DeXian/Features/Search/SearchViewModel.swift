@@ -34,7 +34,7 @@ final class SearchViewModel: ObservableObject {
     /// 书源动辄几百个：如果每个源都立刻起一个任务，就会同时创建几百个
     /// JSVirtualMachine（每个源一个），内存瞬间飙升被系统强杀。
     /// 10 个既能跑满网络，JSVM 数量也远低于危险线。
-    private let concurrentLimit = 10
+    private let concurrentLimit = 5
 
     /// 单轮搜索的总时限：超过后不再启动新的书源任务，
     /// 已在跑的任务继续跑完。避免几百个失效源把一轮搜索拖到十几分钟。
