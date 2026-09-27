@@ -39,9 +39,12 @@ final class HTTPClient {
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60
-        configuration.waitsForConnectivity = true
+        // 搜索要并发几百个源：单个请求最长 15s，避免一个慢源把整轮搜索拖到几分钟。
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        // 断网 / 连不上时立刻失败。置 true 会一直等网络恢复，
+        // 表现就是搜索长时间卡住不动（书源站点常常已经挂了）。
+        configuration.waitsForConnectivity = false
         configuration.httpAdditionalHeaders = [
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
         ]
