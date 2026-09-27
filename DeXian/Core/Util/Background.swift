@@ -16,3 +16,22 @@ enum Background {
         try await Task.detached(priority: .userInitiated) { try work() }.value
     }
 }
+
+/// 线程安全的取值盒子：用于跨线程回传结果（信号量 + 回调场景）。
+final class ValueBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+
+    init(_ value: T) { self.value = value }
+
+    var current: T {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: T) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+}
