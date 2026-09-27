@@ -173,7 +173,7 @@ final class JSEngine {
     }
 
     private func setupJava(_ context: JSContext) {
-        let java = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let java = JSEngine.newObject(in: context)
 
         let connect: @convention(block) (JSValue) -> JSValue = { [weak self, weak context] urlValue in
             guard let self else { return JSValue(undefinedIn: context) }
@@ -360,7 +360,7 @@ final class JSEngine {
     }
 
     private func setupSource(_ context: JSContext) {
-        let source = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let source = JSEngine.newObject(in: context)
 
         let getKey: @convention(block) () -> String = { [weak self] in self?.host.sourceKey ?? "" }
         source.setObject(getKey, forKeyedSubscript: "getKey" as NSString)
@@ -428,7 +428,7 @@ final class JSEngine {
     }
 
     private func setupBookChapter(_ context: JSContext) {
-        let book = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let book = JSEngine.newObject(in: context)
         for key in ["name", "author", "bookUrl", "tocUrl", "origin", "originName", "coverUrl", "intro", "kind"] {
             book.setObject(host.bookInfo[key] ?? "", forKeyedSubscript: key as NSString)
         }
@@ -437,7 +437,7 @@ final class JSEngine {
         }
         context.setObject(book, forKeyedSubscript: "book" as NSString)
 
-        let chapter = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let chapter = JSEngine.newObject(in: context)
         chapter.setObject("", forKeyedSubscript: "title" as NSString)
         chapter.setObject("", forKeyedSubscript: "url" as NSString)
         chapter.setObject("", forKeyedSubscript: "baseUrl" as NSString)
@@ -450,7 +450,7 @@ final class JSEngine {
     }
 
     private func setupCookie(_ context: JSContext) {
-        let cookie = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let cookie = JSEngine.newObject(in: context)
 
         let getCookie: @convention(block) (String) -> String = { [weak self] urlString in
             guard let self, let url = URL(string: urlString) else { return "" }
@@ -494,7 +494,7 @@ final class JSEngine {
     }
 
     private func setupCache(_ context: JSContext) {
-        let cacheObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let cacheObject = JSEngine.newObject(in: context)
 
         let get: @convention(block) (String) -> String? = { [weak self] name in self?.cache[name] }
         cacheObject.setObject(get, forKeyedSubscript: "get" as NSString)
@@ -536,8 +536,8 @@ final class JSEngine {
     // MARK: 网络响应
 
     private func connect(url urlString: String, header: JSValue?, method: String?, body: String?) -> JSValue {
-        guard let context else { return JSValue(undefinedIn: nil) }
-        guard !urlString.isEmpty else { return JSValue(undefinedIn: nil) }
+        guard let context else { return JSEngine.undefinedValue }
+        guard !urlString.isEmpty else { return JSEngine.undefinedValue }
 
         var options = HTTPRequestOptions()
         if let method { options.method = method }
@@ -572,7 +572,7 @@ final class JSEngine {
             return makeResponseObject(response, context: context)
         } catch {
             Log.debugLog("JS", "请求失败: " + error.localizedDescription + " url=" + resolvedURL)
-            let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+            let object = JSEngine.newObject(in: context)
             object.setObject("", forKeyedSubscript: "body" as NSString)
             object.setObject("", forKeyedSubscript: "__text" as NSString)
             object.setObject(0, forKeyedSubscript: "code" as NSString)
@@ -581,7 +581,7 @@ final class JSEngine {
     }
 
     private func makeResponseObject(_ response: HTTPResponse, context: JSContext) -> JSValue {
-        let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        let object = JSEngine.newObject(in: context)
         let text = response.text
         let headerMap = response.headers
         let statusCode = response.statusCode
@@ -610,11 +610,11 @@ final class JSEngine {
         object.setObject(allHeaders, forKeyedSubscript: "headers" as NSString)
 
         let raw: @convention(block) () -> JSValue = { [weak context] in
-            guard let context else { return JSValue(undefinedIn: nil) }
-            let rawObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+            guard let context else { return JSEngine.undefinedValue }
+            let rawObject = JSEngine.newObject(in: context)
             let request: @convention(block) () -> JSValue = { [weak context] in
-                guard let context else { return JSValue(undefinedIn: nil) }
-                let requestObject = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+                guard let context else { return JSEngine.undefinedValue }
+                let requestObject = JSEngine.newObject(in: context)
                 let urlFunction: @convention(block) () -> String = { finalURL }
                 requestObject.setObject(urlFunction, forKeyedSubscript: "url" as NSString)
                 let headerFunction: @convention(block) (String) -> String = { name in
@@ -636,8 +636,8 @@ final class JSEngine {
     // MARK: 元素包装
 
     private func wrapElement(_ node: HTMLNode) -> JSValue {
-        guard let context else { return JSValue(undefinedIn: nil) }
-        let object = JSValue(newObjectIn: context) ?? JSValue(undefinedIn: context)
+        guard let context else { return JSEngine.undefinedValue }
+        let object = JSEngine.newObject(in: context)
 
         let text: @convention(block) () -> String = { node.normalizedText }
         object.setObject(text, forKeyedSubscript: "text" as NSString)
@@ -695,6 +695,25 @@ final class JSEngine {
     }
 
     // MARK: 值转换
+
+    /// 新建一个空 JS 对象。
+    ///
+    /// 不要用 `JSValue(newObjectIn:) ?? ...`：该初始化器返回的是可选值，
+    /// 一旦用 `??` 兜底，整个表达式的类型就退化成 `JSValue?`，
+    /// 后续所有 `setObject(_:forKeyedSubscript:)` 都会编译失败
+    /// （CI 上一次 86 个 error 全部出自这里）。
+    /// 统一收口成一个返回非可选值的方法，既修类型又保留兜底。
+    static func newObject(in context: JSContext) -> JSValue {
+        if let object = JSValue(newObjectIn: context) { return object }
+        return JSValue(undefinedIn: context)
+    }
+
+    /// 上下文已不可用（引擎已释放）时的占位值。
+    static var undefinedValue: JSValue {
+        JSValue(undefinedIn: nil)
+    }
+
+
 
     static func stringFrom(_ value: JSValue?) -> String {
         guard let value, !value.isUndefined, !value.isNull else { return "" }
