@@ -100,28 +100,125 @@ enum Charset {
         return nil
     }
 
-    /// 综合解码：BOM > 指定编码 > Content-Type > meta > UTF-8 > GBK
+    /// 综合解码：指定编码 > BOM > Content-Type > meta > UTF-8 > GB18030
+    ///
+    /// 关键点：GB18030 几乎能「成功」解码任意字节序列，
+    /// 所以绝不能让它排在 UTF-8 前面——网页里只要有一个坏字节，
+    /// UTF-8 解码失败后退到 GB18030，整篇正文就变成乱码。
+    /// 这里先做严格的 UTF-8 校验，通过就直接用，不再往下试探。
     static func decode(_ data: Data, preferred: String.Encoding? = nil) -> String {
         if data.isEmpty { return "" }
 
-        if let encoding = preferred, let text = String(data: data, encoding: encoding) {
-            return text
+        if let encoding = preferred, let text = decodeStrict(data, encoding) {
+            return cleanDecoded(text)
         }
-        if let encoding = fromBOM(data), let text = String(data: data, encoding: encoding) {
-            return text
+        if let encoding = fromBOM(data), let text = decodeStrict(data, encoding) {
+            return cleanDecoded(text)
         }
-        if let text = String(data: data, encoding: .utf8) {
-            return text
+        // UTF-8 严格校验通过就采用：这是中文站点的绝大多数情况
+        if isValidUTF8(data), let text = String(data: data, encoding: .utf8) {
+            return cleanDecoded(text)
         }
-        if let encoding = fromHTMLMeta(data), let text = String(data: data, encoding: encoding) {
-            return text
+        if let encoding = fromHTMLMeta(data), let text = decodeStrict(data, encoding) {
+            return cleanDecoded(text)
         }
-        if let encoding = encoding(named: "gb18030"), let text = String(data: data, encoding: encoding) {
-            return text
+        // 到这里才认为是传统编码：按「解码后乱码字符最少」择优
+        return cleanDecoded(bestEffortDecode(data))
+    }
+
+    /// 严格解码：失败返回 nil，不做任何替换
+    private static func decodeStrict(_ data: Data, _ encoding: String.Encoding) -> String? {
+        String(data: data, encoding: encoding)
+    }
+
+    /// 校验整段数据是否为合法 UTF-8（含过长编码与代理区校验）
+    static func isValidUTF8(_ data: Data) -> Bool {
+        var index = 0
+        let bytes = [UInt8](data)
+        let count = bytes.count
+        while index < count {
+            let byte = bytes[index]
+            if byte < 0x80 { index += 1; continue }
+            var length = 0
+            var lower: UInt32 = 0
+            var upper: UInt32 = 0
+            if byte >= 0xC2, byte <= 0xDF {
+                length = 1; lower = 0x80; upper = 0xBF
+            } else if byte == 0xE0 {
+                length = 2; lower = 0xA0; upper = 0xBF
+            } else if byte >= 0xE1, byte <= 0xEC {
+                length = 2; lower = 0x80; upper = 0xBF
+            } else if byte == 0xED {
+                length = 2; lower = 0x80; upper = 0x9F
+            } else if byte >= 0xEE, byte <= 0xEF {
+                length = 2; lower = 0x80; upper = 0xBF
+            } else if byte == 0xF0 {
+                length = 3; lower = 0x90; upper = 0xBF
+            } else if byte >= 0xF1, byte <= 0xF3 {
+                length = 3; lower = 0x80; upper = 0xBF
+            } else if byte == 0xF4 {
+                length = 3; lower = 0x80; upper = 0x8F
+            } else {
+                return false
+            }
+            guard index + length < count else { return false }
+            for offset in 1...length {
+                let next = bytes[index + offset]
+                let lowerBound = offset == 1 ? lower : 0x80
+                let upperBound = offset == 1 ? upper : 0xBF
+                guard UInt32(next) >= lowerBound, UInt32(next) <= upperBound else { return false }
+            }
+            index += length + 1
         }
-        if let text = String(data: data, encoding: .isoLatin1) {
-            return text
+        return true
+    }
+
+    /// 在候选编码里挑「乱码最少」的那个。
+    ///
+    /// 判据是替换字符与私有区字符的数量：真正解码正确的编码几乎不会产生它们。
+    private static func bestEffortDecode(_ data: Data) -> String {
+        let candidates: [String.Encoding] = [
+            encoding(named: "gb18030") ?? .utf8,
+            encoding(named: "big5") ?? .utf8,
+            encoding(named: "shift-jis") ?? .utf8
+        ]
+        var best = ""
+        var bestScore = Int.max
+        for candidate in candidates {
+            guard let text = String(data: data, encoding: candidate) else { continue }
+            let score = garbleScore(text)
+            if score < bestScore {
+                bestScore = score
+                best = text
+                if score == 0 { break }
+            }
         }
-        return ""
+        if !best.isEmpty { return best }
+        // 全失败时用「永不失败」的解码，至少保证有内容可显示
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// 乱码打分：替换字符、私有区、控制字符越多分越高
+    private static func garbleScore(_ text: String) -> Int {
+        var score = 0
+        var checked = 0
+        for scalar in text.unicodeScalars {
+            checked += 1
+            if checked > 20_000 { break }
+            let value = scalar.value
+            if value == 0xFFFD { score += 10 }
+            else if (0xE000...0xF8FF).contains(value) { score += 10 }
+            else if value < 0x09 { score += 6 }
+            else if (0x0B...0x0C).contains(value) { score += 6 }
+            else if (0x0E...0x1F).contains(value) { score += 6 }
+        }
+        return score
+    }
+
+    /// 兜底清理：去掉替换字符，避免正文里出现成片「�」
+    static func cleanDecoded(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: { $0.value == 0xFFFD }) else { return text }
+        return text.replacingOccurrences(of: "\u{FFFD}", with: "")
     }
 }
+
