@@ -1020,7 +1020,7 @@ final class RssTests: XCTestCase {
         }
         XCTAssertFalse(Charset.isValidUTF8(data))
         let html = "<html><head><meta charset=\"gbk\"></head><body>" + source + "</body></html>"
-        guard let htmlData = html.data(using: .isoLatin1) else { return XCTFail("构造失败") }
+        guard let htmlData = html.data(using: gbk) else { return XCTFail("构造失败") }
         let decoded = Charset.decode(htmlData)
         XCTAssertTrue(decoded.contains(source), "GBK 页面解码结果： " + decoded)
     }
