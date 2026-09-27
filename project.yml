@@ -28,6 +28,8 @@ targets:
       - path: DeXian
         excludes:
           - "**/*.md"
+          # 误传的重复文件名会让 Swift 报 "Filename used twice"，直接排除
+          - "Features/Rss/SourceListView.swift"
     info:
       path: Support/Info.plist
       properties:
