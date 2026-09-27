@@ -136,6 +136,9 @@ final class SettingsStore: ObservableObject {
         var pageTurn: PageTurn
         var keepScreenOn: Bool
         var showProgress: Bool
+        /// 分页模式下是否显示底部「上一页 / 页码 / 下一页」条。
+        /// 可选：老版本设置文件里没有这个键，缺失时按「不显示」处理。
+        var showPageFooter: Bool?
         var comicFitWidth: Bool
         var fullScreen: Bool
         var textIndent: Bool
@@ -154,6 +157,11 @@ final class SettingsStore: ObservableObject {
     @Published var pageTurn: PageTurn = .scroll { didSet { persist() } }
     @Published var keepScreenOn: Bool = true { didSet { persist() } }
     @Published var showProgress: Bool = true { didSet { persist() } }
+    /// 分页模式底部的翻页条。
+    ///
+    /// 默认关闭：正文之外多一条工具栏会占掉一整行高度，
+    /// 翻页本身用左右轻点或横滑就能完成，那一条纯属干扰。
+    @Published var showPageFooter: Bool = false { didSet { persist() } }
     @Published var comicFitWidth: Bool = true { didSet { persist() } }
     @Published var fullScreen: Bool = false { didSet { persist() } }
     @Published var textIndent: Bool = true { didSet { persist() } }
@@ -177,6 +185,7 @@ final class SettingsStore: ObservableObject {
             pageTurn = snapshot.pageTurn
             keepScreenOn = snapshot.keepScreenOn
             showProgress = snapshot.showProgress
+            showPageFooter = snapshot.showPageFooter ?? false
             comicFitWidth = snapshot.comicFitWidth
             fullScreen = snapshot.fullScreen
             textIndent = snapshot.textIndent
@@ -198,6 +207,7 @@ final class SettingsStore: ObservableObject {
             pageTurn: pageTurn,
             keepScreenOn: keepScreenOn,
             showProgress: showProgress,
+            showPageFooter: showPageFooter,
             comicFitWidth: comicFitWidth,
             fullScreen: fullScreen,
             textIndent: textIndent,
