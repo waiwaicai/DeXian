@@ -147,7 +147,9 @@ final class SourceEngine {
         for item in items {
             let itemAnalyzer = makeAnalyzer(content: item, baseUrl: target, js: js)
             let title = itemAnalyzer.string(source.tocRule.chapterName)
-            let chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+            var chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+            // 同上：目录项通常是 <a>，规则没给 chapterUrl 时取 href。
+            if chapterURL.trimmed.isEmpty { chapterURL = elementHref(in: item) }
             guard !title.isEmpty || !chapterURL.isEmpty else { continue }
             chapters.append(BookChapter(
                 url: RuleUtil.absoluteURL(chapterURL, base: target),
@@ -173,7 +175,8 @@ final class SourceEngine {
             for item in nextItems {
                 let itemAnalyzer = makeAnalyzer(content: item, baseUrl: resolvedNext, js: js)
                 let title = itemAnalyzer.string(source.tocRule.chapterName)
-                let chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+                var chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+                if chapterURL.trimmed.isEmpty { chapterURL = elementHref(in: item) }
                 guard !title.isEmpty || !chapterURL.isEmpty else { continue }
                 chapters.append(BookChapter(
                     url: RuleUtil.absoluteURL(chapterURL, base: resolvedNext),
@@ -220,7 +223,10 @@ final class SourceEngine {
         var text = contentAnalyzer.string(source.contentRule.content)
 
         // 图片链接（漫画 / 插图）
-        var images = extractImages(from: text, baseUrl: parsed.url)
+        // 漫画规则常直接选中 img 的容器节点，走 string() 会把 <img> 拍平成纯文本，
+        // 这里改用保留 outerHTML 的 htmlString，图片才不会丢。
+        let contentHTML = contentAnalyzer.htmlString(source.contentRule.content)
+        var images = extractImages(from: contentHTML.isEmpty ? text : contentHTML, baseUrl: parsed.url)
 
         // 正文翻页
         var nextURLString = contentAnalyzer.string(source.contentRule.nextContentUrl)
@@ -233,7 +239,8 @@ final class SourceEngine {
             let nextText = nextAnalyzer.string(source.contentRule.content)
             if nextText.isEmpty { break }
             text += "\n" + nextText
-            images.append(contentsOf: extractImages(from: nextText, baseUrl: nextURL))
+            let nextHTML = nextAnalyzer.htmlString(source.contentRule.content)
+            images.append(contentsOf: extractImages(from: nextHTML.isEmpty ? nextText : nextHTML, baseUrl: nextURL))
             let following = nextAnalyzer.string(source.contentRule.nextContentUrl)
             if following == nextURLString { break }
             nextURLString = following
@@ -541,7 +548,10 @@ final class SourceEngine {
         analyzer.key = keyword
 
         let name = analyzer.string(rule.name)
-        let bookURL = analyzer.string(rule.bookUrl)
+        var bookURL = analyzer.string(rule.bookUrl)
+        // 书源没写 bookUrl（只写了 bookList + name）时，Legado 会退回取元素自身的
+        // href；yckceo 上一大批源都是这种写法，不回退就会得到空地址。
+        if bookURL.trimmed.isEmpty { bookURL = elementHref(in: item) }
         guard !name.isEmpty || !bookURL.isEmpty else { return nil }
 
         let author = analyzer.string(rule.author)
@@ -562,6 +572,30 @@ final class SourceEngine {
         )
     }
 
+    /// 取列表条目自身指向的地址。
+    ///
+    /// 对齐 Legado 的默认行为：书源只写了列表规则、没写 bookUrl /
+    /// chapterUrl 时，直接使用条目元素的 href（JSON 条目则取 url / link）。
+    /// 没有这一步，yckceo 上一大批「只给列表+书名」的源会拿到空地址。
+    private func elementHref(in item: Any) -> String {
+        if let node = item as? HTMLNode {
+            let value = node.attribute("href") ?? node.attribute("data-href") ?? ""
+            if !value.trimmed.isEmpty { return value }
+            // <a> 之外常见写法：把地址放在子元素或 data-src 上
+            for key in ["data-url", "data-src", "data-original"] {
+                if let found = node.attribute(key), !found.trimmed.isEmpty { return found }
+            }
+            return ""
+        }
+        if let dictionary = item as? [String: Any] {
+            for key in ["bookUrl", "url", "link", "href", "detailUrl"] {
+                if let value = RuleUtil.asString(dictionary[key]), !value.trimmed.isEmpty { return value }
+            }
+        }
+        if let text = item as? String { return text.trimmed }
+        return ""
+    }
+
     /// 去重并限制条目数量。
     ///
     /// SearchBook.id 是「源 id + 书籍地址」拼出来的，书源规则写得松时
@@ -572,7 +606,12 @@ final class SourceEngine {
         var seen = Set<String>()
         var result: [SearchBook] = []
         for book in books {
-            guard seen.insert(book.id).inserted else { continue }
+            // 地址为空时不能用 book.id 当键：所有空地址的书会算成同一条，
+            // 整个书源的结果会被压成一本。这时退化成「书名+作者」当键。
+            let key = book.bookUrl.trimmed.isEmpty
+                ? "name:" + book.name + "|" + book.author
+                : book.id
+            guard seen.insert(key).inserted else { continue }
             result.append(book)
             if result.count >= 500 { break }
         }
