@@ -10,9 +10,31 @@ final class SourceEngine {
     let source: BookSource
     /// 书籍级共享变量（对应 book.variable，用于存 bookId 之类）
     let variables: VariableStore
-    private lazy var headers: [String: String] = parseHeaders()
+    /// 请求头缓存。
+    ///
+    /// 不能用 lazy var：同一个 SourceEngine 会被并发使用
+    /// （阅读时 preloadNeighbors 会同时预取后两章，缓存整本也会复用同一引擎），
+    /// 而 Swift 的 lazy 初始化不是线程安全的，两边同时首次访问会触发
+    /// 内存冲突直接崩溃。这里改成显式加锁的一次性初始化。
+    private let headersLock = NSLock()
+    private var cachedHeaders: [String: String]?
+    private var headers: [String: String] {
+        headersLock.lock()
+        if let cachedHeaders {
+            headersLock.unlock()
+            return cachedHeaders
+        }
+        headersLock.unlock()
+        let value = parseHeaders()
+        headersLock.lock()
+        cachedHeaders = value
+        headersLock.unlock()
+        return value
+    }
+
     /// 音频书源解析出的直链缓存，按章节地址区分（音源通常只返回一次）
     private var audioCache: [String: String] = [:]
+    private let audioLock = NSLock()
 
     /// 取页面 / 请求用的兜底 JS 引擎。
     ///
@@ -114,6 +136,26 @@ final class SourceEngine {
             let (kind, body) = RuleSyntax.detectKind(target)
             _ = kind
             target = js.evaluateString(body)
+        }
+
+        // api 型书源：搜索结果里的详情地址为空，信息由接口/规则直接给出。
+        // 这时不能拿空地址去发请求（会抛「地址为空」直接失败），
+        // 只用规则本身算出 tocUrl 等字段，让调用方得以继续取目录。
+        if target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let ruleJS = makeJSEngine(content: nil, bookInfo: bookInfo, chapterInfo: [:], title: "")
+            let ruleAnalyzer = makeAnalyzer(content: nil, baseUrl: source.url, js: ruleJS)
+            var info = BookInfo()
+            info.name = ruleAnalyzer.string(source.bookInfoRule.name)
+            info.author = ruleAnalyzer.string(source.bookInfoRule.author)
+            info.kind = ruleAnalyzer.string(source.bookInfoRule.kind).nilIfBlank
+            info.wordCount = ruleAnalyzer.string(source.bookInfoRule.wordCount).nilIfBlank
+            info.lastChapter = ruleAnalyzer.string(source.bookInfoRule.lastChapter).nilIfBlank
+            info.intro = ruleAnalyzer.string(source.bookInfoRule.intro).nilIfBlank
+            let cover = ruleAnalyzer.string(source.bookInfoRule.coverUrl)
+            info.coverUrl = RuleUtil.absoluteURL(cover, base: source.url).nilIfBlank
+            let toc = ruleAnalyzer.string(source.bookInfoRule.tocUrl)
+            info.tocUrl = toc.isEmpty ? nil : RuleUtil.absoluteURL(toc, base: source.url)
+            return info
         }
 
         let content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "", js: js)
@@ -307,7 +349,12 @@ final class SourceEngine {
         chapterInfo: [String: String] = [:],
         chapterTitle: String = ""
     ) async throws -> String {
-        if let cached = audioCache[chapterUrl], !cached.isEmpty { return cached }
+        audioLock.lock()
+        if let cached = audioCache[chapterUrl], !cached.isEmpty {
+            audioLock.unlock()
+            return cached
+        }
+        audioLock.unlock()
 
         let js = makeJSEngine(content: nil, bookInfo: bookInfo, chapterInfo: chapterInfo, title: chapterTitle)
         let analyzer = makeAnalyzer(content: nil, baseUrl: chapterUrl, js: js)
@@ -345,7 +392,9 @@ final class SourceEngine {
         guard let first = candidates.first(where: { !$0.isEmpty }) else {
             throw SourceError.emptyContent
         }
+        audioLock.lock()
         audioCache[chapterUrl] = first
+        audioLock.unlock()
         return first
     }
 
