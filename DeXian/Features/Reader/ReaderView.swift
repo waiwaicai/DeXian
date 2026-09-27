@@ -153,7 +153,8 @@ struct ReaderView: View {
                     ComicReaderView(
                         images: viewModel.images,
                         fitWidth: settings.comicFitWidth,
-                        referer: viewModel.currentChapter?.url ?? ""
+                        referer: viewModel.currentChapter?.url ?? "",
+                        sourceKey: viewModel.book.origin
                     )
                     .id(scrollTick)
                 } else {
@@ -342,13 +343,18 @@ struct TextReaderView: View {
                     if viewModel.isLoadingContent, viewModel.content.isEmpty {
                         loadingIndicator
                     } else {
-                        Text(displayContent)
-                            .font(settings.readingFont)
-                            .lineSpacing(settings.lineSpacing)
-                            .foregroundStyle(textColor)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .id("content")
+                        // 逐段渲染：段落间距真实可控，长文排版更稳
+                        VStack(alignment: .leading, spacing: CGFloat(settings.paragraphSpacing)) {
+                            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                                Text(paragraph)
+                                    .font(settings.readingFont)
+                                    .lineSpacing(settings.lineSpacing)
+                                    .foregroundStyle(textColor)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .textSelection(.enabled)
+                        .id("content")
                     }
 
                     chapterFooter
@@ -420,18 +426,17 @@ struct TextReaderView: View {
         .padding(.top, Theme.Spacing.xxl)
     }
 
-    /// 段落缩进与首行处理
-    private var displayContent: String {
-        let raw = viewModel.content
-        guard settings.textIndent else { return raw }
-        return raw
-            .components(separatedBy: "\n")
-            .map { line -> String in
-                let value = line.trimmingCharacters(in: .whitespaces)
-                if value.isEmpty { return "" }
-                return "　　" + value
-            }
-            .joined(separator: "\n")
+    /// 正文分段：空行丢弃，段首按设置决定是否缩进两格
+    private var paragraphs: [String] {
+        let value = viewModel.content
+        guard !value.isEmpty else { return [] }
+        var output: [String] = []
+        for line in value.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            output.append(settings.textIndent ? "　　" + trimmed : trimmed)
+        }
+        return output
     }
 
     /// 正文颜色：与 ReaderView 的背景选择保持一致
@@ -450,6 +455,8 @@ struct ComicReaderView: View {
     var fitWidth: Bool
     /// 章节页地址，用作图片 Referer
     var referer: String = ""
+    /// 所属书源 id：带上该源 Cookie，登录后才能看的漫画才出图
+    var sourceKey: String?
 
     var body: some View {
         if images.isEmpty {
@@ -462,7 +469,7 @@ struct ComicReaderView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(images.enumerated()), id: \.offset) { _, url in
-                        ComicPageView(url: url, fitWidth: fitWidth, referer: referer)
+                        ComicPageView(url: url, fitWidth: fitWidth, referer: referer, sourceKey: sourceKey)
                     }
                 }
                 .padding(.top, Theme.Spacing.lg)
@@ -475,13 +482,15 @@ struct ComicReaderView: View {
 struct ComicPageView: View {
     let url: String
     var fitWidth: Bool
+    /// 正文所在页地址，作为图片请求的 Referer（多数图站会校验）
+    var referer: String = ""
+    /// 所属书源 id
+    var sourceKey: String?
 
     @State private var image: UIImage?
     @State private var failed = false
-    /// 已尝试次数：大于 0 时给请求加时间戳，绕过 URLCache 拿到真实结果
+    /// 重试次数：用于触发重新加载（不再污染 URL）
     @State private var attempt = 0
-    /// 正文所在页地址，作为图片请求的 Referer（多数图站会校验）
-    var referer: String = ""
 
     var body: some View {
         Group {
@@ -498,10 +507,13 @@ struct ComicPageView: View {
                     Text("图片加载失败")
                         .font(.themeCaption)
                         .foregroundStyle(Theme.ColorToken.textTertiary)
+                    Text("可能是图床防盗链或网络异常")
+                        .font(.themeTiny)
+                        .foregroundStyle(Theme.ColorToken.textTertiary)
                     Button("重试") {
                         failed = false
                         attempt += 1
-                        Task { await load() }
+                        Task { await load(force: true) }
                     }
                     .font(.themeCaption)
                 }
@@ -512,41 +524,34 @@ struct ComicPageView: View {
                     .frame(maxWidth: .infinity, minHeight: 220)
             }
         }
-        .task(id: url) {
-            await load()
+        .task(id: attempt) {
+            await load(force: attempt > 0)
         }
     }
 
-    /// 重试时附加时间戳，避免命中失败的缓存
-    private var requestURL: String {
-        guard attempt > 0 else { return url }
-        let separator = url.contains("?") ? "&" : "?"
-        return url + separator + "_r=" + String(attempt)
-    }
-
-    private func load() async {
+    private func load(force: Bool) async {
         guard image == nil else { return }
-        // 只在首次加载时读缓存，重试一律走网络
-        if attempt == 0, let cached = ImageCache.shared.image(for: url) {
+        // 按屏幕宽度做下采样：漫画原图常有 3000px 宽，
+        // 全尺寸解码一屏就是几百 MB，滚动几页必被系统杀掉。
+        let maxPixel = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        if !force, let cached = ImageCache.shared.image(for: url + "|" + String(Int(maxPixel))) {
             image = cached
             return
         }
-        do {
-            let data = try await HTTPClient.shared.data(
-                urlString: requestURL,
-                headers: ["Referer": referer.isEmpty ? url : referer]
-            )
-            guard let decoded = UIImage(data: data) else {
-                failed = true
-                return
-            }
-            ImageCache.shared.store(decoded, for: url)
-            image = decoded
-        } catch {
+        let loaded = await ImageLoader.shared.image(
+            url: url,
+            maxPixel: maxPixel,
+            referer: referer,
+            sourceKey: sourceKey
+        )
+        if let loaded {
+            image = loaded
+        } else {
             failed = true
         }
     }
 }
+
 
 // MARK: - 目录
 
@@ -712,11 +717,21 @@ struct ReaderSettingsSheet: View {
 
                 Section("字体") {
                     Picker("字体", selection: $settings.fontFamily) {
-                        Text("系统").tag("系统")
-                        Text("宋体").tag("宋体")
-                        Text("圆体").tag("圆体")
+                        ForEach(SettingsStore.fontFamilies, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
+
+                    // 段落间距：长文阅读时拉开段落更省眼
+                    HStack {
+                        Text("段落间距")
+                        Slider(value: $settings.paragraphSpacing, in: 0...30, step: 2)
+                        Text(String(Int(settings.paragraphSpacing)))
+                            .font(.themeCaption)
+                            .foregroundStyle(Theme.ColorToken.textSecondary)
+                            .frame(width: 28, alignment: .trailing)
+                    }
                 }
 
                 Section("翻页") {
