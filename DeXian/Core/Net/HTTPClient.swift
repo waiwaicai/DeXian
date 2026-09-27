@@ -61,6 +61,25 @@ final class HTTPClient {
         defaultHeaders: [String: String] = [:],
         base: String? = nil
     ) async throws -> HTTPResponse {
+        let request = try Self.buildRequest(
+            urlString: urlString,
+            options: options,
+            sourceKey: sourceKey,
+            defaultHeaders: defaultHeaders,
+            base: base
+        )
+        let (data, response) = try await session.data(for: request)
+        return try Self.decode(data: data, response: response, options: options, sourceKey: sourceKey)
+    }
+
+    /// 组装 URLRequest（异步 / 同步共用，保证两条路径行为一致）
+    private static func buildRequest(
+        urlString: String,
+        options: HTTPRequestOptions,
+        sourceKey: String?,
+        defaultHeaders: [String: String],
+        base: String?
+    ) throws -> URLRequest {
         let resolved = RuleUtil.absoluteURL(urlString, base: base)
         guard let url = URL(string: resolved) else {
             throw NetworkError.invalidURL(urlString)
@@ -92,8 +111,16 @@ final class HTTPClient {
                 request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
             }
         }
+        return request
+    }
 
-        let (data, response) = try await session.data(for: request)
+    /// 把 URLSession 的响应整理成 HTTPResponse（异步 / 同步共用）
+    private static func decode(
+        data: Data,
+        response: URLResponse,
+        options: HTTPRequestOptions,
+        sourceKey: String?
+    ) throws -> HTTPResponse {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NetworkError.invalidResponse
         }
@@ -145,7 +172,12 @@ final class HTTPClient {
         return data
     }
 
-    /// 同步请求：供 JS 引擎的 java.connect/java.get/java.post 使用。
+    /// 同步请求：供 JS 引擎的 java.ajax / java.connect / java.get / java.post 使用。
+    ///
+    /// 这里刻意不用 Task / async-await：JS 求值本身跑在 Swift 并发的协作线程池上，
+    /// 同步等待会占住池里的线程，池子被占满后回调再也拿不到线程，直接死锁。
+    /// 改用 URLSession 的 completionHandler（回调在自己的 delegate 队列上执行，
+    /// 与协作线程池无关）+ 信号量等待，等待上限取请求超时的兜底值。
     func requestSync(
         urlString: String,
         options: HTTPRequestOptions = HTTPRequestOptions(),
@@ -153,24 +185,41 @@ final class HTTPClient {
         defaultHeaders: [String: String] = [:],
         base: String? = nil
     ) throws -> HTTPResponse {
-        let semaphore = DispatchSemaphore(value: 0)
+        let request = try Self.buildRequest(
+            urlString: urlString,
+            options: options,
+            sourceKey: sourceKey,
+            defaultHeaders: defaultHeaders,
+            base: base
+        )
+
         let box = ResponseBox()
-        Task.detached {
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = session.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            if let error {
+                box.set(.failure(error))
+                return
+            }
+            guard let data, let response else {
+                box.set(.failure(NetworkError.invalidResponse))
+                return
+            }
             do {
-                let response = try await HTTPClient.shared.request(
-                    urlString: urlString,
-                    options: options,
-                    sourceKey: sourceKey,
-                    defaultHeaders: defaultHeaders,
-                    base: base
-                )
-                box.set(.success(response))
+                box.set(.success(try Self.decode(data: data, response: response,
+                                               options: options, sourceKey: sourceKey)))
             } catch {
                 box.set(.failure(error))
             }
-            semaphore.signal()
         }
-        semaphore.wait()
+        task.resume()
+
+        // 请求本身已有 30s 级超时；这里再兜一层，保证任何情况下都不会永久卡住。
+        let limit = min(max(options.timeout, 30), 90)
+        guard semaphore.wait(timeout: .now() + limit + 5) == .success else {
+            task.cancel()
+            throw NetworkError.timeout
+        }
         switch box.result {
         case .success(let response): return response
         case .failure(let error): throw error
@@ -240,6 +289,7 @@ enum NetworkError: LocalizedError {
     case invalidResponse
     case emptyContent
     case httpStatus(Int)
+    case timeout
 
     var errorDescription: String? {
         switch self {
@@ -247,6 +297,7 @@ enum NetworkError: LocalizedError {
         case .invalidResponse: return "服务器响应异常"
         case .emptyContent: return "内容为空"
         case .httpStatus(let code): return "请求失败（HTTP " + String(code) + "）"
+        case .timeout: return "请求超时"
         }
     }
 }
