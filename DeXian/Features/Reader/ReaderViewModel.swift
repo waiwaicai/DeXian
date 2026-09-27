@@ -110,7 +110,45 @@ final class ReaderViewModel: ObservableObject {
             shelf.updateChapters(bookId: book.id, chapters: list)
             shelf.updateVariables(bookId: book.id, variables: engine.variableSnapshot)
         } catch {
+            // 漫画源普遍不提供章节目录：整本就是一个阅读页。
+            // 这类书源在详情页会一直是「目录获取失败」，用户根本进不去。
+            // 这里退一步，直接拿书籍页当成唯一一章去解析图片，
+            // 把「打不开」变成「能看」。
+            if await fallbackToSingleChapter() { return }
             state = .failed(SourceError.describe(error))
+        }
+    }
+
+    /// 漫画源兜底：没有目录时把书籍页本身当作唯一一章。
+    ///
+    /// 返回 true 表示已成功建立可读的单章，调用方不应再报错。
+    private func fallbackToSingleChapter() async -> Bool {
+        guard book.type == .image else { return false }
+        // 不要用 book.tocUrl! —— 这里是网络失败路径，
+        // 在这种地方强制解包等于把「加载失败」升级成「闪退」。
+        let tocCandidate = (book.tocUrl ?? "").trimmed
+        let target = tocCandidate.isEmpty ? book.bookUrl : tocCandidate
+        guard !target.trimmed.isEmpty, let engine else { return false }
+        do {
+            let result = try await engine.content(
+                chapterUrl: target,
+                bookInfo: bookInfoMap,
+                chapterInfo: ["title": book.name, "url": target, "index": "0", "bookUrl": book.bookUrl],
+                chapterTitle: book.name
+            )
+            guard !result.images.isEmpty else { return false }
+            let chapter = BookChapter(url: target, title: book.name, index: 0,
+                                      isVip: false, updateTime: nil, tag: nil,
+                                      start: nil, end: nil, variable: nil)
+            chapters = [chapter]
+            currentIndex = 0
+            content = result.text
+            images = result.images
+            state = .loaded
+            shelf.updateChapters(bookId: book.id, chapters: chapters)
+            return true
+        } catch {
+            return false
         }
     }
 

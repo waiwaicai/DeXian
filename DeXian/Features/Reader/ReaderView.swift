@@ -568,6 +568,8 @@ struct PagedReaderView: View {
         var paragraphSpacing: Int
         var family: String
         var indent: Bool
+        /// 底栏显隐会影响可用高度，必须参与比较，否则开关后不重排
+        var showFooter: Bool
         /// 正文长度：内容一变就要重新分页（用长度而不是全文，避免每帧重排）
         var contentLength: Int
     }
@@ -587,6 +589,7 @@ struct PagedReaderView: View {
             paragraphSpacing: Int(settings.paragraphSpacing.rounded()),
             family: settings.fontFamily,
             indent: settings.textIndent,
+            showFooter: settings.showPageFooter,
             contentLength: viewModel.content.count
         )
     }
@@ -597,7 +600,12 @@ struct PagedReaderView: View {
                 pageBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                pageFooter
+                // 底部翻页条默认不显示：正文之外再压一条工具栏
+                // 既占高度又抢注意力，翻页用左右轻点 / 横滑就够了。
+                // 想看页码的话可以在「排版设置」里打开。
+                if settings.showPageFooter {
+                    pageFooter
+                }
             }
             .padding(.horizontal, Theme.Spacing.xl)
             .padding(.top, ReaderMetrics.topInset)
@@ -755,10 +763,13 @@ struct PagedReaderView: View {
         guard size.width > 40, size.height > 80 else { return }
 
         // 顶部与底部内边距必须从可用高度里扣掉，否则每页末尾的字会被裁掉。
-        // 还要再扣掉分页页脚（上一页 / 下一页）那一行的高度。
+        // 底栏只有在显示时才需要额外扣掉它那一行的高度 ——
+        // 否则关掉底栏后会白留一行，每页少排一行字。
+        let footerHeight: CGFloat = settings.showPageFooter ? 34 : 0
         let reserved: CGFloat = ReaderMetrics.topInset
             + ReaderMetrics.bottomInset
             + Theme.Spacing.xl + Theme.Spacing.lg
+            + footerHeight
         let layout = PageSplitter.Layout(
             font: PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize),
             lineSpacing: settings.lineSpacing,
@@ -1152,7 +1163,8 @@ struct ReaderSettingsSheet: View {
                         }
                     }
                     Toggle("段落缩进", isOn: $settings.textIndent)
-                    Toggle("显示进度", isOn: $settings.showProgress)
+                    Toggle("显示顶部进度", isOn: $settings.showProgress)
+                    Toggle("显示底部翻页条", isOn: $settings.showPageFooter)
                 }
 
                 Section("漫画") {
