@@ -25,6 +25,9 @@ enum Log {
         buffer.append(Entry(category: category, message: message))
         if buffer.count > 400 { buffer.removeFirst(buffer.count - 400) }
         lock.unlock()
+        // 同时在崩溃报告里留一份现场：闪退时内存里的这条环形缓冲会一起消失，
+        // 只有预先镜像到信号安全区，崩溃报告才能带上「崩之前正在做什么」。
+        CrashReporter.record(category + ": " + message)
     }
 
     static var recent: [Entry] {
