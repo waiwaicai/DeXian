@@ -79,6 +79,12 @@ final class ReaderViewModel: ObservableObject {
 
     func loadTocIfNeeded() async {
         if !chapters.isEmpty { return }
+        // 地址为空的记录：多半是书源没写 bookUrl 又没能回退到 href，
+        // 这种情况继续请求只会得到一句「地址为空」，干脆直接告诉用户换源。
+        guard !book.bookUrl.trimmed.isEmpty || !(book.tocUrl ?? "").trimmed.isEmpty else {
+            state = .failed("这本书没有可用地址，请在搜索页换一个书源")
+            return
+        }
         guard let engine else {
             state = .failed("书源缺失，请重新添加书籍")
             return
