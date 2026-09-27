@@ -35,6 +35,14 @@ targets:
       properties:
         CFBundleDisplayName: 得闲
         CFBundleName: DeXian
+        # xcodegen 给这两个键的默认值是字面量 "1.0" / "1"，
+        # 不会自动引用 MARKETING_VERSION / CURRENT_PROJECT_VERSION，
+        # 结果每次出包的 Info.plist 都停在 1.0 (1)。
+        # 侧载工具会据此判断「不是新版本」而拒绝安装，
+        # 用户也无法从「设置」里分辨手上装的是哪一版。
+        # 显式写成构建变量，Xcode 在 Process Info.plist 阶段会替换。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen:
           UIColorName: ""
         UISupportedInterfaceOrientations:
