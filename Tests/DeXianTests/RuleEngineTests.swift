@@ -664,6 +664,25 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(picked.count, 1)
     }
 
+    /// 漫画正文规则直接选中容器节点时，必须保留 <img>，不能拍平成纯文本。
+    ///
+    /// 多数漫画源的 content 规则写成 `class.comic-contain` 这类节点选择器，
+    /// 早期实现走 string() 会把 <img src> 丢掉，导致「一张图都没有」。
+    func testHtmlStringKeepsImgForComicRules() {
+        let html = """
+        <div class="comic-contain"><img src="/p/1.jpg"><img data-src="/p/2.jpg"></div>
+        """
+        let analyzer = AnalyzeRule(content: html)
+        let text = analyzer.string("class.comic-contain")
+        let markup = analyzer.htmlString("class.comic-contain")
+
+        XCTAssertFalse(markup.isEmpty)
+        XCTAssertTrue(markup.contains("<img"))
+        XCTAssertTrue(markup.contains("/p/1.jpg"))
+        // 纯文本形态拿不到 src，正好说明为什么必须用 htmlString
+        XCTAssertFalse(text.contains("/p/1.jpg"))
+    }
+
     // MARK: JS 返回对象数组的漫画图片
 
     func testComicImagesFromJSObjectArray() {
