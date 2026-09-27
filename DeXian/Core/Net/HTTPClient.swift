@@ -83,7 +83,7 @@ final class HTTPClient {
         defaultHeaders: [String: String],
         base: String?
     ) throws -> URLRequest {
-        let resolved = RuleUtil.absoluteURL(urlString, base: base)
+        let resolved = RuleUtil.sanitizeURL(RuleUtil.absoluteURL(urlString, base: base))
         guard let url = URL(string: resolved) else {
             throw NetworkError.invalidURL(urlString)
         }
@@ -154,26 +154,56 @@ final class HTTPClient {
     }
 
     /// 下载二进制（图片 / 音频）
+    /// 请求资源类型：图片要走更宽松的解码与更严格的响应校验。
+    enum ResourceKind {
+        case text
+        case image
+    }
+
+    /// 下载二进制数据（图片、字体等）。
+    ///
+    /// 这里必须复用 buildRequest：图片请求同样需要 UA / Accept / Cookie，
+    /// 否则图床会把请求当成脚本，返回 403 或者返回一张提示图，
+    /// 表现就是「所有漫画图都加载失败」。
     func data(
         urlString: String,
         headers: [String: String] = [:],
         sourceKey: String? = nil,
-        base: String? = nil
+        base: String? = nil,
+        kind: ResourceKind = .image
     ) async throws -> Data {
-        let resolved = RuleUtil.absoluteURL(urlString, base: base)
-        guard let url = URL(string: resolved) else {
-            throw NetworkError.invalidURL(urlString)
+        var options = HTTPRequestOptions()
+        options.headers = headers
+        if kind == .image {
+            options.headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
         }
-        var request = URLRequest(url: url)
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+        let request = try Self.buildRequest(
+            urlString: urlString,
+            options: options,
+            sourceKey: sourceKey,
+            defaultHeaders: [:],
+            base: base
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.invalidResponse
         }
-        if let sourceKey, let cookie = CookieJar.shared.cookieHeader(for: sourceKey, url: url) {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if let sourceKey {
+            CookieJar.shared.store(response: httpResponse, sourceKey: sourceKey)
         }
-        let (data, _) = try await session.data(for: request)
+        guard (200..<400).contains(httpResponse.statusCode) else {
+            throw NetworkError.httpStatus(httpResponse.statusCode)
+        }
+        guard !data.isEmpty else { throw NetworkError.emptyContent }
+        // 防盗链站点常用「返回一张 HTML 错误页」代替 403，
+        // 这里直接拦掉，免得把网页正文当图片去解码。
+        if let mime = httpResponse.mimeType?.lowercased(),
+           mime.hasPrefix("text/") || mime.contains("html") || mime.contains("json") {
+            throw NetworkError.invalidResponse
+        }
         return data
     }
+
 
     /// 同步请求：供 JS 引擎的 java.ajax / java.connect / java.get / java.post 使用。
     ///
