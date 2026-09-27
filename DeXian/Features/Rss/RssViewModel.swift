@@ -84,7 +84,7 @@ final class RssViewModel: ObservableObject {
             nextPageURL = result.nextPageURL
         } catch {
             if reset { articles = [] }
-            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? SourceError.describe(error)
         }
     }
 }
