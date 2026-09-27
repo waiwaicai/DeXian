@@ -235,9 +235,14 @@ struct SourceListView: View {
     /// 当前筛选结果（来自缓存，body 不重复计算）
     private var filtered: [BookSource] { filteredCache }
 
-    /// 当前实际渲染的行（分页）
+    /// 当前实际渲染的行（分页）。
+    ///
+    /// 这里再按 id 去重一次：List/ForEach 只要拿到重复 id 就会
+    /// fatalError 崩溃，导入的书源数据不可信，渲染前必须兜住。
     private var visibleSources: [BookSource] {
-        filteredCache.count > renderLimit ? Array(filteredCache.prefix(renderLimit)) : filteredCache
+        var seen = Set<String>()
+        let unique = filteredCache.filter { seen.insert($0.id).inserted }
+        return unique.count > renderLimit ? Array(unique.prefix(renderLimit)) : unique
     }
 
     /// 重新计算筛选结果与分组计数
