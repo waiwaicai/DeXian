@@ -116,10 +116,26 @@ struct ShelfBook: Codable, Hashable, Identifiable {
     /// 缓存的目录
     var chapters: [BookChapter]
 
+    /// 书架条目的稳定标识。
+    ///
+    /// 常规情况是「书源 + 书籍地址」。但 api 型书源的搜索结果是空地址
+    /// （详情靠接口/规则给出），此时所有书都会算出同一个 id，
+    /// SwiftUI 的 ForEach 碰到重复 id 会直接 fatalError 崩溃，
+    /// 书架里也永远只存得下一本。空了就补上书名与作者。
+    static func identifier(origin: String, bookUrl: String, name: String, author: String) -> String {
+        let base = origin + "|" + bookUrl
+        return bookUrl.trimmed.isEmpty ? base + "|" + name + "|" + author : base
+    }
+
     init(search: SearchBook, info: BookInfo?, tocUrl: String?, groupId: String? = nil) {
         let resolvedName = (info?.name.nilIfBlank) ?? search.name
         let resolvedAuthor = (info?.author.nilIfBlank) ?? search.author
-        id = "\(search.origin)|\(search.bookUrl)"
+        id = ShelfBook.identifier(
+            origin: search.origin,
+            bookUrl: search.bookUrl,
+            name: resolvedName,
+            author: resolvedAuthor
+        )
         name = resolvedName
         author = resolvedAuthor
         coverUrl = info?.coverUrl?.nilIfBlank ?? search.coverUrl
