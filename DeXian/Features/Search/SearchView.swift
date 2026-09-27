@@ -120,12 +120,19 @@ struct SearchView: View {
                     Section {
                         VStack(spacing: 0) {
                             ForEach(result.books) { book in
-                                Button {
-                                    addToShelf(book)
+                                NavigationLink {
+                                    BookDetailView(searchBook: book)
                                 } label: {
                                     SearchBookRow(book: book, showSource: false)
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button {
+                                        addToShelf(book)
+                                    } label: {
+                                        Label("加入书架", systemImage: "plus.circle")
+                                    }
+                                }
 
                                 if book.id != result.books.last?.id {
                                     Divider()
