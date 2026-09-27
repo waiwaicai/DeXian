@@ -133,7 +133,10 @@ struct BookDetailView: View {
             Button {
                 startReading()
             } label: {
-                Label(chapters.isEmpty ? "加载中" : "开始阅读", systemImage: "book.fill")
+                // 原先只判断 chapters.isEmpty，于是「目录加载失败」也会
+                // 一直显示「加载中」—— 用户看到的是永远转不完的假进度，
+                // 既不知道失败了、也没法重试。这里按真实状态区分。
+                Label(readingButtonTitle, systemImage: readingButtonIcon)
             }
             .buttonStyle(PrimaryButtonStyle(enabled: !chapters.isEmpty))
             .disabled(chapters.isEmpty)
@@ -242,7 +245,7 @@ struct BookDetailView: View {
                           systemImage: "list.bullet.indent")
 
             if chapters.isEmpty {
-                Text("暂无章节信息")
+                Text(isLoading ? "正在获取目录…" : (errorMessage == nil ? "暂无章节信息" : "目录获取失败，请点上方「重试」"))
                     .font(.themeCallout)
                     .foregroundStyle(Theme.ColorToken.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -290,6 +293,19 @@ struct BookDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .cardStyle(padding: Theme.Spacing.md)
         }
+    }
+
+    // MARK: 派生状态
+
+    /// 「开始阅读」按钮的文案：加载中 / 失败 / 可阅读 三态分明
+    private var readingButtonTitle: String {
+        if !chapters.isEmpty { return "开始阅读" }
+        if isLoading { return "正在获取目录" }
+        return "目录获取失败"
+    }
+
+    private var readingButtonIcon: String {
+        chapters.isEmpty && !isLoading ? "exclamationmark.triangle" : "book.fill"
     }
 
     // MARK: 数据
