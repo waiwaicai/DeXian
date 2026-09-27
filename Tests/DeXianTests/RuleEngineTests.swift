@@ -741,9 +741,83 @@ final class RuleEngineTests: XCTestCase {
         cache.remove(bookId: bookId)
         XCTAssertFalse(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
     }
+    // MARK: 崩溃防护（第三方书源内容不受控，必须挡在解析层）
+
+    /// 深度递归的 XPath 表达式不能让栈溢出。
+    ///
+    /// 这类规则来自第三方书源：形如一连串负号或层层括号的表达式
+    /// 会让递归下降解析器无限展开。栈溢出是硬件级错误，
+    /// Swift 的 do/catch 抓不住，进程会当场硬崩且不产生崩溃报告 ——
+    /// 表现就是「某个书源一搜就闪退」。
+    func testXPathDeepExpressionDoesNotCrash() {
+        let root = document()
+        let negations = String(repeating: "-", count: 20000) + "1"
+        _ = XPathEngine.evaluate(negations, document: root)
+
+        let parentheses = String(repeating: "(", count: 20000) + "1" + String(repeating: ")", count: 20000)
+        _ = XPathEngine.evaluate(parentheses, document: root)
+
+        // 正常表达式必须完全不受影响
+        XCTAssertEqual(XPathEngine.nodes("//div[@class='item']", document: root).count, 3)
+    }
+
+    /// 深层嵌套的 JSON 递归遍历同样要有上限。
+    ///
+    /// 这里刻意只造 3000 层：真要造到两万层，测试自己在释放这串
+    /// 嵌套容器时就会因 ARC 递归析构而爆栈 —— 那是另一个坑。
+    /// 3000 层已远超遍历上限，足以验证「遍历会在上限处停下」。
+    func testJSONPathDeeplyNestedDoesNotCrash() {
+        let depth = 3000
+        var nested: Any = ["name": "最内层"]
+        for _ in 0..<depth { nested = ["child": nested] }
+
+        // 最内层的那条数据超出了遍历上限，因此不应被收集到，
+        // 且整个过程不能崩。
+        let results = JSONPath.query("$..name", json: nested)
+        XCTAssertTrue(results.isEmpty, "超出深度上限的内容不应被遍历到")
+
+        // 上限本身必须是安全的小值（真递归深度还要乘以栈帧开销）
+        XCTAssertLessThanOrEqual(JSONPath.maxDepth, 256)
+
+        // 正常路径仍然可用
+        XCTAssertEqual(JSONPath.query("$.data.total", json: jsonObject()).first as? Int, 2)
+    }
+
+    /// JSONPath 过滤表达式里的括号嵌套也要有上限。
+    func testJSONPathDeepFilterDoesNotCrash() {
+        let deep = "$.data.list[?(" + String(repeating: "(", count: 20000)
+            + "@.price>20" + String(repeating: ")", count: 20000) + ")].name"
+        _ = JSONPath.query(deep, json: jsonObject())
+        XCTAssertEqual(JSONPath.query("$.data.list[?(@.price>20)].name", json: jsonObject()).first as? String, "书二")
+    }
+
+    /// $..* 作用在大 JSON 上必须有结果上限，否则内存会被顶爆。
+    func testJSONPathRecursiveWildcardIsCapped() {
+        var list: [Any] = []
+        for index in 0..<60000 { list.append(["id": index]) }
+        let results = JSONPath.query("$..*", json: ["data": list])
+        XCTAssertLessThanOrEqual(results.count, 20001, "递归通配必须有结果上限")
+    }
+
+    /// 声明体积超限的响应要被拦下，不能先收进内存。
+    func testHTTPClientRejectsOversizedDeclaredResponse() {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://example.com/big")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Length": String(512 * 1024 * 1024)]
+        )!
+        XCTAssertThrowsError(try HTTPClient.checkDeclaredSize(response))
+    }
+
+    /// 分页模式下底部翻页条默认不显示（正文区不该被工具栏挤占）。
+    @MainActor
+    func testPageFooterIsHiddenByDefault() {
+        let store = SettingsStore()
+        XCTAssertFalse(store.showPageFooter)
+    }
+
 }
-
-
 // MARK: - 订阅源（RSS）
 
 final class RssTests: XCTestCase {
@@ -1091,7 +1165,6 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(merged.bookList, ".explore-item")
     }
 
-
     // MARK: 回归：崩溃与排版
 
     /// 空地址的 api 书源：所有书都算出同一个 id 会让 ForEach 直接崩溃
@@ -1313,81 +1386,5 @@ final class RssTests: XCTestCase {
         var seen = Set<String>()
         let unique = list.items.filter { seen.insert($0.id).inserted }
         XCTAssertEqual(unique.count, 2)
-    }
-
-    // MARK: 崩溃防护（第三方书源内容不受控，必须挡在解析层）
-
-    /// 深度递归的 XPath 表达式不能让栈溢出。
-    ///
-    /// 这类规则来自第三方书源：形如一连串负号或层层括号的表达式
-    /// 会让递归下降解析器无限展开。栈溢出是硬件级错误，
-    /// Swift 的 do/catch 抓不住，进程会当场硬崩且不产生崩溃报告 ——
-    /// 表现就是「某个书源一搜就闪退」。
-    func testXPathDeepExpressionDoesNotCrash() {
-        let root = document()
-        let negations = String(repeating: "-", count: 20000) + "1"
-        _ = XPathEngine.evaluate(negations, document: root)
-
-        let parentheses = String(repeating: "(", count: 20000) + "1" + String(repeating: ")", count: 20000)
-        _ = XPathEngine.evaluate(parentheses, document: root)
-
-        // 正常表达式必须完全不受影响
-        XCTAssertEqual(XPathEngine.nodes("//div[@class='item']", document: root).count, 3)
-    }
-
-    /// 深层嵌套的 JSON 递归遍历同样要有上限。
-    ///
-    /// 这里刻意只造 3000 层：真要造到两万层，测试自己在释放这串
-    /// 嵌套容器时就会因 ARC 递归析构而爆栈 —— 那是另一个坑。
-    /// 3000 层已远超遍历上限，足以验证「遍历会在上限处停下」。
-    func testJSONPathDeeplyNestedDoesNotCrash() {
-        let depth = 3000
-        var nested: Any = ["name": "最内层"]
-        for _ in 0..<depth { nested = ["child": nested] }
-
-        // 最内层的那条数据超出了遍历上限，因此不应被收集到，
-        // 且整个过程不能崩。
-        let results = JSONPath.query("$..name", json: nested)
-        XCTAssertTrue(results.isEmpty, "超出深度上限的内容不应被遍历到")
-
-        // 上限本身必须是安全的小值（真递归深度还要乘以栈帧开销）
-        XCTAssertLessThanOrEqual(JSONPath.maxDepth, 256)
-
-        // 正常路径仍然可用
-        XCTAssertEqual(JSONPath.query("$.data.total", json: jsonObject()).first as? Int, 2)
-    }
-
-    /// JSONPath 过滤表达式里的括号嵌套也要有上限。
-    func testJSONPathDeepFilterDoesNotCrash() {
-        let deep = "$.data.list[?(" + String(repeating: "(", count: 20000)
-            + "@.price>20" + String(repeating: ")", count: 20000) + ")].name"
-        _ = JSONPath.query(deep, json: jsonObject())
-        XCTAssertEqual(JSONPath.query("$.data.list[?(@.price>20)].name", json: jsonObject()).first as? String, "书二")
-    }
-
-    /// $..* 作用在大 JSON 上必须有结果上限，否则内存会被顶爆。
-    func testJSONPathRecursiveWildcardIsCapped() {
-        var list: [Any] = []
-        for index in 0..<60000 { list.append(["id": index]) }
-        let results = JSONPath.query("$..*", json: ["data": list])
-        XCTAssertLessThanOrEqual(results.count, 20001, "递归通配必须有结果上限")
-    }
-
-    /// 声明体积超限的响应要被拦下，不能先收进内存。
-    func testHTTPClientRejectsOversizedDeclaredResponse() {
-        let response = HTTPURLResponse(
-            url: URL(string: "https://example.com/big")!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: ["Content-Length": String(512 * 1024 * 1024)]
-        )!
-        XCTAssertThrowsError(try HTTPClient.checkDeclaredSize(response))
-    }
-
-    /// 分页模式下底部翻页条默认不显示（正文区不该被工具栏挤占）。
-    @MainActor
-    func testPageFooterIsHiddenByDefault() {
-        let store = SettingsStore()
-        XCTAssertFalse(store.showPageFooter)
     }
 }
