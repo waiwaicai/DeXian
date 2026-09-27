@@ -397,6 +397,21 @@ enum CSSSelector {
     private static func matchesSequenceRightToLeft(_ sequence: Sequence, index: Int, element: HTMLNode) -> Bool {
         guard matchesCompound(sequence.compound[index], element: element) else { return false }
         if index == 0 { return true }
+        // 组合符表长度理论上恒等于 compound.count - 1，但只要有任何一条
+        // 选择器解析出「复合段比组合符多」的中间态，这里的 index - 1 就会
+        // 变成 -1 并以数组越界陷阱（SIGABRT）直接终止进程 ——
+        // 这种崩溃发生在 JS 回调触发的规则求值里，用户只看到搜索到一半闪退。
+        // 这里显式做边界判断，越界按「后代」处理，语义与缺少组合符时一致。
+        guard index - 1 < sequence.combinators.count else {
+            var cursor = element.parent
+            while let current = cursor {
+                if current.isElement, matchesSequenceRightToLeft(sequence, index: index - 1, element: current) {
+                    return true
+                }
+                cursor = current.parent
+            }
+            return false
+        }
         let combinator = sequence.combinators[index - 1]
         switch combinator {
         case ">":
