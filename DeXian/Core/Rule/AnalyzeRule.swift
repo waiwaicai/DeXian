@@ -125,6 +125,30 @@ final class AnalyzeRule {
         return []
     }
 
+    /// 取规则的「HTML 形态」结果。
+    ///
+    /// 漫画源的正文规则经常直接选中 img 所在容器（例：class.comic-contain），
+    /// 这时如果走 string()，节点会被拍平成纯文本，<img> 全部丢失，
+    /// extractImages 就再也找不到图片。节点结果保留 outerHTML。
+    func htmlString(_ rule: String?) -> String {
+        guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
+            let value = evaluateRule(branch)
+            switch value {
+            case .nodes(let nodes):
+                let html = nodes.map { $0.outerHTML }.joined(separator: "\n")
+                if !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return html }
+            case .strings(let values):
+                let merged = values.joined(separator: "\n")
+                if !merged.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return merged }
+            case .raw(let any):
+                if let node = any as? HTMLNode { return node.outerHTML }
+                if let text = RuleUtil.asString(any), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return text }
+            }
+        }
+        return ""
+    }
+
     /// 列表规则（书籍列表 / 目录列表）：返回条目（HTMLNode 或 JSON 对象）。
     func listItems(_ rule: String?) -> [Any] {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
