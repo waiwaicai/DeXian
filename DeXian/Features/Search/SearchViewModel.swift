@@ -59,7 +59,7 @@ final class SearchViewModel: ObservableObject {
     /// 更关键的是 JSEngine.evaluate 内部把所有求值串行化到同一条队列上，
     /// 所以提高这个数字不会让 JS 侧并发度上升，只是让网络等待并行起来 ——
     /// 这正是「几百个源要跑到天亮」的真正瓶颈。
-    private let concurrentLimit = 8
+    private let concurrentLimit = 6
 
     /// 单个书源的抓取上限。
     ///
