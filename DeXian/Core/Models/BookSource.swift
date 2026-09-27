@@ -160,7 +160,7 @@ struct ContentRule: Codable, Hashable {
 
 /// 发现分类
 struct ExploreCategory: Codable, Hashable, Identifiable {
-    var id: String { "\(title ?? "")|\(url ?? "")" }
+    var id: String { (title ?? "") + "|" + (url ?? "") + "|" + String(children?.count ?? 0) }
     var title: String?
     var url: String?
     /// 二级分类
