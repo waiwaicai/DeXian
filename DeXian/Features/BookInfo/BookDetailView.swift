@@ -178,7 +178,12 @@ struct BookDetailView: View {
             return
         }
         if !isInShelf { addToShelf() }
-        guard let book = shelf.book(id: searchBook.origin + "|" + searchBook.bookUrl) else { return }
+        guard let book = shelf.book(
+            origin: searchBook.origin,
+            bookUrl: searchBook.bookUrl,
+            name: displayInfo.name,
+            author: displayInfo.author
+        ) else { return }
         ChapterCache.shared.cacheAll(
             book: book,
             chapters: chapters,
@@ -190,7 +195,12 @@ struct BookDetailView: View {
     }
 
     private var isInShelf: Bool {
-        shelf.contains(bookUrl: searchBook.bookUrl, origin: searchBook.origin)
+        shelf.contains(
+            bookUrl: searchBook.bookUrl,
+            origin: searchBook.origin,
+            name: displayInfo.name,
+            author: displayInfo.author
+        )
     }
 
     private func errorCard(_ message: String) -> some View {
@@ -278,9 +288,23 @@ struct BookDetailView: View {
         let engine = SourceEngine(source: source)
 
         do {
-            let detail = try await engine.bookInfo(bookUrl: searchBook.bookUrl)
+            // api 型书源（如大量 JSON 接口源）搜索结果的 detailUrl 常为空，
+            // 目录直接由接口给出。此时跳过详情页，直接按 tocUrl / bookUrl 取目录，
+            // 否则会拿空地址去请求，只能得到一句「地址为空」。
+            var detail = BookInfo()
+            if !searchBook.bookUrl.trimmed.isEmpty {
+                detail = try await engine.bookInfo(bookUrl: searchBook.bookUrl)
+            }
             info = detail
-            let tocLink = detail.tocUrl ?? searchBook.bookUrl
+
+            let tocLink = (detail.tocUrl?.trimmed.isEmpty == false ? detail.tocUrl : nil)
+                ?? searchBook.bookUrl
+            guard !tocLink.trimmed.isEmpty else {
+                chapters = []
+                errorMessage = "该源未提供书籍地址，无法打开目录"
+                isLoading = false
+                return
+            }
             chapters = try await engine.toc(tocUrl: tocLink, bookInfo: bookInfoMap(detail))
             errorMessage = nil
         } catch {
@@ -307,7 +331,12 @@ struct BookDetailView: View {
 
     private func toggleShelf() {
         if isInShelf {
-            let id = searchBook.origin + "|" + searchBook.bookUrl
+            let id = ShelfBook.identifier(
+                origin: searchBook.origin,
+                bookUrl: searchBook.bookUrl,
+                name: displayInfo.name,
+                author: displayInfo.author
+            )
             shelf.remove(ids: [id])
             appState.show("已移出书架")
             return
@@ -328,7 +357,12 @@ struct BookDetailView: View {
 
     private func startReading(at chapter: BookChapter? = nil) {
         if !isInShelf { addToShelf() }
-        var book = shelf.book(id: searchBook.origin + "|" + searchBook.bookUrl) ?? shelfBook
+        var book = shelf.book(
+            origin: searchBook.origin,
+            bookUrl: searchBook.bookUrl,
+            name: displayInfo.name,
+            author: displayInfo.author
+        ) ?? shelfBook
         if book == nil {
             var created = ShelfBook(search: searchBook, info: displayInfo, tocUrl: info?.tocUrl)
             created.chapters = chapters
