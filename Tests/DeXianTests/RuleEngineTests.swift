@@ -650,6 +650,20 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(analyzer.listItems("class.item").count, 3)
     }
 
+    /// 环状 DOM 不能把选择器拖进死循环。
+    ///
+    /// 书源规则自建节点、或解析异常时有可能出现自引用，
+    /// 之前遍历会一直展开直到内存耗尽被系统强杀。
+    func testLegacySelectorTerminatesOnCyclicTree() {
+        let root = HTMLNode(kind: .element, name: "div")
+        let child = HTMLNode(kind: .element, name: "span")
+        root.append(child)
+        child.children.append(root)   // 人为制造环
+
+        let picked = LegacySelector.select("tag.span", in: root)
+        XCTAssertEqual(picked.count, 1)
+    }
+
     // MARK: JS 返回对象数组的漫画图片
 
     func testComicImagesFromJSObjectArray() {
