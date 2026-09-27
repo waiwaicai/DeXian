@@ -49,7 +49,46 @@ final class JSEngine {
     // MARK: 求值
 
     /// 求值脚本。返回 String / Int64 / Double / Bool / JSON 对象。
+    /// JS 求值专用线程。
+    ///
+    /// 书源脚本里会有 `java.ajax` 这类同步网络调用，必须在求值期间阻塞。
+    /// 如果直接在 Swift 并发协作线程池上求值，阻塞会占满池线程
+    /// （iPhone 通常只有 6 个左右），后续 Task 拿不到线程就会整页卡死，
+    /// 最终被系统看门狗强杀。这里统一把求值放到专用线程串行执行。
+    /// 用 specific 标记队列身份：脚本内部会回调 java.getString，
+    /// 进而重入 evaluate。若直接对串行队列 sync 会自锁死，这里做可重入判断。
+    private static let evaluationQueueKey = DispatchSpecificKey<UInt8>()
+    private static let evaluationQueue: DispatchQueue = {
+        let queue = DispatchQueue(label: "com.dexian.js.evaluate", attributes: .concurrent)
+        queue.setSpecific(key: evaluationQueueKey, value: 1)
+        return queue
+    }()
+
+    /// 供需要「等待用户操作」的脚本调用（如 java.startBrowserAwait）。
+    /// 由外部注入：运行在后台线程，内部自行切主线程弹出界面。
+    var awaitUserAction: ((String, String) -> String)?
+
+    /// 在 JS 求值内部同步等待用户完成网页操作（验证码 / 登录）。
+    ///
+    /// 脚本运行在专用线程上，这里用信号量阻塞不会影响协作线程池。
+    func waitForUserAction(url: String, title: String) -> String {
+        guard let awaitUserAction else { return "" }
+        return awaitUserAction(url, title)
+    }
+
     func evaluate(_ script: String) -> Any? {
+        // 已在专用线程上（脚本回调重入）：直接求值，避免对同一队列 sync 死锁
+        if DispatchQueue.getSpecific(key: JSEngine.evaluationQueueKey) != nil {
+            return evaluateOnQueue(script)
+        }
+        var output: Any?
+        JSEngine.evaluationQueue.sync {
+            output = evaluateOnQueue(script)
+        }
+        return output
+    }
+
+    private func evaluateOnQueue(_ script: String) -> Any? {
         lock.lock()
         defer { lock.unlock() }
         guard let context else { return nil }
@@ -143,6 +182,25 @@ final class JSEngine {
             Log.debugLog("JS", JSEngine.stringFrom(value))
         }
         java.setObject(log, forKeyedSubscript: "log" as NSString)
+
+        // 对应 Legado 的 java.startBrowserAwait：弹出网页让用户过验证 / 登录，
+        // 完成后把 Cookie 交回脚本继续执行。
+        let startBrowserAwait: @convention(block) (JSValue, JSValue) -> String = { [weak self] urlValue, titleValue in
+            guard let self else { return "" }
+            let target = JSEngine.stringFrom(urlValue)
+            guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+            let title = JSEngine.stringFrom(titleValue)
+            return self.waitForUserAction(url: target, title: title)
+        }
+        java.setObject(startBrowserAwait, forKeyedSubscript: "startBrowserAwait" as NSString)
+
+        let startBrowser: @convention(block) (JSValue, JSValue) -> Void = { [weak self] urlValue, titleValue in
+            guard let self else { return }
+            let target = JSEngine.stringFrom(urlValue)
+            guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            _ = self.waitForUserAction(url: target, title: JSEngine.stringFrom(titleValue))
+        }
+        java.setObject(startBrowser, forKeyedSubscript: "startBrowser" as NSString)
 
         let getVariable: @convention(block) (String) -> String? = { [weak self] name in
             self?.host.variables[name]
