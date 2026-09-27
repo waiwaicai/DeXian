@@ -725,6 +725,29 @@ enum SourceError: LocalizedError {
         case .sourceDisabled: return "书源已禁用"
         }
     }
+
+    /// 把系统英文错误翻成中文，方便在搜索页一眼看出原因。
+    static func describe(_ error: Error) -> String {
+        if let source = error as? SourceError { return source.errorDescription ?? "书源错误" }
+        if let network = error as? NetworkError { return network.errorDescription ?? "网络错误" }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return ns.localizedDescription }
+        switch ns.code {
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+            return "系统拦截了明文 http（ATS）"
+        case NSURLErrorTimedOut: return "请求超时"
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed: return "域名解析失败"
+        case NSURLErrorCannotConnectToHost: return "无法连接服务器"
+        case NSURLErrorNetworkConnectionLost: return "网络连接中断"
+        case NSURLErrorNotConnectedToInternet: return "当前无网络"
+        case NSURLErrorUnsupportedURL: return "链接格式不支持"
+        case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid:
+            return "HTTPS 证书校验失败"
+        case NSURLErrorCancelled: return "请求已取消"
+        default: return ns.localizedDescription
+        }
+    }
 }
 
 extension ExploreRule {
