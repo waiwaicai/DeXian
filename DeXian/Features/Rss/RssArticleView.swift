@@ -177,7 +177,7 @@ struct RssArticleView: View {
             blocks = RssContentRenderer.render(html: html, baseUrl: article.link)
             state = .loaded
         } catch {
-            state = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            state = .failed((error as? LocalizedError)?.errorDescription ?? SourceError.describe(error))
         }
     }
 }
