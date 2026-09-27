@@ -130,12 +130,39 @@ enum RuleUtil {
     // MARK: URL
 
     /// 相对链接转绝对链接。跳过 data:/javascript:/特殊 scheme。
-    static func absoluteURL(_ url: String, base: String?) -> String {
-        var value = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        static func absoluteURL(_ url: String, base: String?) -> String {
+        let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty { return value }
         if value.hasPrefix("data:") || value.hasPrefix("javascript:") || value.hasPrefix("mailto:") {
             return value
         }
+        return sanitizeURL(resolveRelativeURL(value, base: base))
+    }
+
+    /// 把含中文 / 空格 / 花括号的地址转成合法 URL。
+    ///
+    /// 书源里的图片与章节地址大量含中文文件名，裸 `URL(string:)` 会直接返回 nil，
+    /// 请求还没发出去就抛「链接无效」，表现就是整章漫画全部加载失败。
+    /// 这里只在确实解析不了时才做百分号编码，避免把已编码的地址二次编码。
+    static func sanitizeURL(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return trimmed }
+        if URL(string: trimmed) != nil { return trimmed }
+        if let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed),
+           URL(string: encoded) != nil {
+            return encoded
+        }
+        // 兜底：地址里混进裸 % 时，连 % 一起编码
+        let allowed = CharacterSet.urlFragmentAllowed.subtracting(CharacterSet(charactersIn: "%"))
+        if let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: allowed),
+           URL(string: encoded) != nil {
+            return encoded
+        }
+        return trimmed
+    }
+
+    /// 相对地址拼接（不含百分号编码，编码统一在 absoluteURL 收口）
+    private static func resolveRelativeURL(_ value: String, base: String?) -> String {
         if value.hasPrefix("//") {
             if let scheme = base.flatMap({ URL(string: $0)?.scheme }) {
                 return scheme + ":" + value
@@ -167,7 +194,7 @@ enum RuleUtil {
         return base + "/" + value
     }
 
-    /// 求值内嵌的 JS 段，对齐 Legado 的 AnalyzeUrl.analyzeJs。
+/// 求值内嵌的 JS 段，对齐 Legado 的 AnalyzeUrl.analyzeJs。
     ///
     /// 书源里会写成 `<js>if(page==1){source.setVariable('')}</js>index.php?action=search&p={{page}}`：
     /// JS 段先执行，其返回值与后面的静态片段拼接成最终地址；
