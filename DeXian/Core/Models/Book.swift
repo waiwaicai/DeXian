@@ -18,7 +18,13 @@ enum BookType: Int, Codable {
 
 /// 搜索 / 发现得到的书籍条目
 struct SearchBook: Codable, Hashable, Identifiable {
-    var id: String { "\(origin)|\(bookUrl)" }
+    /// 列表展示用的稳定 id。
+    ///
+    /// 不能只用「书源 + 地址」：书源规则写得松时会有多本书拿到空地址，
+    /// 这些书 id 全部相同，SwiftUI 的 ForEach 遇到重复 id 会直接
+    /// fatalError 崩溃（列表滚动到重复项时必崩）。这里把书名与作者一起纳入，
+    /// 空地址也不再撞车；书架条目另有自己的 id，不受影响。
+    var id: String { origin + "|" + bookUrl + "|" + name + "|" + author }
     var name: String
     var author: String
     var kind: String?
