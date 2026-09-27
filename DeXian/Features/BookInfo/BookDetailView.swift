@@ -284,7 +284,7 @@ struct BookDetailView: View {
             chapters = try await engine.toc(tocUrl: tocLink, bookInfo: bookInfoMap(detail))
             errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = SourceError.describe(error)
         }
         isLoading = false
     }
