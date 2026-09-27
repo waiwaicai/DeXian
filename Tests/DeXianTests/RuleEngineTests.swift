@@ -720,19 +720,22 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(decoded.images, ["https://a.test/1.jpg"])
     }
 
+    /// 缓存写入 / 读取现在都是异步的（磁盘 IO 已移出主线程）。
     @MainActor
-    func testChapterCacheStoresAndReadsBack() {
+    func testChapterCacheStoresAndReadsBack() async {
         let cache = ChapterCache.shared
         let bookId = "test-cache-book-" + UUID().uuidString
         let chapterUrl = "https://comic.test/ch/" + UUID().uuidString
         defer { cache.remove(bookId: bookId) }
 
+        // meta 未读入内存时，一律视为未缓存
         XCTAssertFalse(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
         let content = ChapterContent(text: "缓存正文", images: [], nextChapterUrl: nil)
-        cache.store(bookId: bookId, name: "缓存测试", origin: "src", chapterUrl: chapterUrl, content: content)
+        await cache.store(bookId: bookId, name: "缓存测试", origin: "src", chapterUrl: chapterUrl, content: content)
 
         XCTAssertTrue(cache.isCached(bookId: bookId, chapterUrl: chapterUrl))
-        XCTAssertEqual(cache.content(bookId: bookId, chapterUrl: chapterUrl)?.text, "缓存正文")
+        let back = await cache.content(bookId: bookId, chapterUrl: chapterUrl)
+        XCTAssertEqual(back?.text, "缓存正文")
         XCTAssertEqual(cache.counts(bookId: bookId).cached, 1)
 
         cache.remove(bookId: bookId)
@@ -1223,6 +1226,28 @@ final class RssTests: XCTestCase {
         let json = "[{\"rule\":\"div[0]@text\"},{\"rule\":\"a(b)\"}]"
         let ranges = FileStorage.arrayElementRanges(Data(json.utf8))
         XCTAssertEqual(ranges?.count, 2)
+    }
+
+    /// 顶层元素是「字符串」时也必须切得出来。
+    ///
+    /// 旧实现只在 `}` / `]` 处结算元素，对字符串元素永远算不出闭合，
+    /// 于是整个数组被判定成「切不出元素」并退回一次性整份解码 ——
+    /// 内存优化当场失效，又变回启动瞬间吃掉数百 MB。
+    func testFileStorageSplitsStringElements() {
+        let json = "[\"alpha\",\"be,t{a\",\"g\\\"h\"]"
+        let data = Data(json.utf8)
+        let ranges = FileStorage.arrayElementRanges(data)
+        XCTAssertEqual(ranges?.count, 3, "三个字符串元素都要切出来")
+        let pieces = (ranges ?? []).map { String(decoding: data[$0], as: UTF8.self) }
+        XCTAssertEqual(pieces[0], "\"alpha\"")
+        XCTAssertEqual(pieces[1], "\"be,t{a\"", "字符串里的逗号与花括号不能当结构符")
+        XCTAssertEqual(pieces[2], "\"g\\\"h\"", "转义引号不能当成结束")
+    }
+
+    /// 数组末尾没有逗号（或文件被截断）时，最后一个元素也要算上
+    func testFileStorageHandlesTrailingElementWithoutComma() {
+        let ranges = FileStorage.arrayElementRanges(Data("[{\"a\":1}".utf8))
+        XCTAssertEqual(ranges?.count, 1)
     }
 
     /// 分页：同样的正文，字号越大页数越多；窄屏页数也更多
