@@ -17,12 +17,24 @@ import Foundation
 struct FileStorage {
 
     static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        prepareDirectory()
+        return baseDirectory
+    }
+
+    private static let baseDirectory: URL = {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DeXian", isDirectory: true)
+    }()
+
+    /// 提前建好应用支持目录。
+    ///
+    /// 崩溃捕获要在启动最早阶段拿到一个可写的文件描述符，
+    /// 因此目录必须在那之前就存在，不能等到第一次存盘才惰性创建。
+    static func prepareDirectory() {
+        let base = baseDirectory
         if !FileManager.default.fileExists(atPath: base.path) {
             try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         }
-        return base
     }
 
     static func url(_ name: String) -> URL {
@@ -169,6 +181,13 @@ struct FileStorage {
                         escaped = true
                     } else if byte == 0x22 {
                         inString = false
+                        // 顶层字符串元素：闭合引号处才结算，
+                        // 否则 ["a","b"] 这类数组会被判定成「切不出元素」，
+                        // 退回一次性整份解码 —— 又变回巨量内存。
+                        if depth == 0, elementStart >= 0 {
+                            ranges.append(elementStart..<(index + 1))
+                            elementStart = -1
+                        }
                     }
                     index += 1
                     continue
@@ -189,11 +208,19 @@ struct FileStorage {
                     }
                     if depth < 0 { return }
                 case 0x2C where depth == 0:             // ,
-                    elementStart = -1
+                    // 顶层标量元素（数字 / true / null）靠逗号结算
+                    if elementStart >= 0 {
+                        ranges.append(elementStart..<index)
+                        elementStart = -1
+                    }
                 default:
                     if !isWhitespace(byte), elementStart < 0 { elementStart = index }
                 }
                 index += 1
+            }
+            // 收尾：最后一个元素后面可能没有逗号（或文件被截断）
+            if depth == 0, elementStart >= 0 {
+                ranges.append(elementStart..<count)
             }
         }
         return ranges.isEmpty ? nil : ranges
