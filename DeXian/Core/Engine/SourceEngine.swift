@@ -55,9 +55,10 @@ final class SourceEngine {
         listAnalyzer.key = keyword
 
         let items = listAnalyzer.listItems(source.searchRule.bookList)
-        return items.compactMap { item in
+        let books = items.compactMap { item in
             buildSearchBook(item: item, rule: source.searchRule, baseUrl: urlString, js: js, page: page, keyword: keyword)
         }
+        return dedupe(books)
     }
 
     // MARK: 发现
@@ -82,9 +83,10 @@ final class SourceEngine {
         let listAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         listAnalyzer.page = page
         let items = listAnalyzer.listItems(source.exploreRule.bookList)
-        return items.compactMap { item in
+        let books = items.compactMap { item in
             buildSearchBook(item: item, rule: source.exploreRule.asSearchRule, baseUrl: parsed.url, js: js, page: page, keyword: "")
         }
+        return dedupe(books)
     }
 
     // MARK: 详情页
@@ -558,6 +560,23 @@ final class SourceEngine {
             originName: source.name,
             type: BookType(rawValue: source.type.rawValue) ?? .text
         )
+    }
+
+    /// 去重并限制条目数量。
+    ///
+    /// SearchBook.id 是「源 id + 书籍地址」拼出来的，书源规则写得松时
+    /// 很容易出现重复地址；SwiftUI 的 ForEach 遇到重复 id 会直接崩
+    /// （Fatal error: Duplicate ID），必须在这里兜住。
+    /// 同时限制单源结果上限，避免某个源返回上万条把界面卡死。
+    private func dedupe(_ books: [SearchBook]) -> [SearchBook] {
+        var seen = Set<String>()
+        var result: [SearchBook] = []
+        for book in books {
+            guard seen.insert(book.id).inserted else { continue }
+            result.append(book)
+            if result.count >= 500 { break }
+        }
+        return result
     }
 
     /// 相对地址的解析基准。
