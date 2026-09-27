@@ -1419,4 +1419,57 @@ final class RssTests: XCTestCase {
         let unique = list.items.filter { seen.insert($0.id).inserted }
         XCTAssertEqual(unique.count, 2)
     }
+
+    // MARK: 内存 / 生命周期回归
+    //
+    // 这一组锁死「搜索引擎必须能释放」这个不变量。
+    //
+    // 症状：600 多个书源，搜到 97 个左右必闪退，崩溃栈全是 JavaScriptCore
+    // 帧 + Swift 运行时陷阱（SIGABRT）。根因是 JSEngine 里注册给 JS 的每个
+    // block 都强捕获了 JSContext，而这些 block 又挂在同一个 JSContext 的
+    // 全局对象上，形成 JSContext -> java -> block -> JSContext 的循环引用：
+    // 每跑一个书源就泄漏一整个 JSVirtualMachine，搜到近百个源时内存触顶。
+    // 修复后所有 block 一律 [weak context] 捕获，引擎必须能随作用域释放。
+
+    func testJSEngineIsDeallocatedAfterScope() {
+        weak var weakEngine: JSEngine?
+        autoreleasepool {
+            var engine: JSEngine? = JSEngine(host: JSEngine.Host())
+            weakEngine = engine
+            // 跑一次求值，触发 setup 注册的全部宿主回调
+            XCTAssertEqual(engine?.evaluateString("1+1"), "2")
+            // 触发会引用 context 的那几个回调（connect / getElement / get）
+            _ = engine?.evaluate("typeof java.connect")
+            _ = engine?.evaluate("typeof java.getElement")
+            _ = engine?.evaluate("typeof cache.put")
+            engine = nil
+        }
+        XCTAssertNil(weakEngine, "JSEngine 未被释放：JS block 仍在强持有 JSContext，会造成每个书源泄漏一个 JSVirtualMachine")
+    }
+
+    func testManyJSEnginesDoNotAccumulate() {
+        // 模拟一轮多源搜索：连续建 200 个引擎（远超用户说的 97）。
+        // 修复前每个引擎都泄漏一个 JSVirtualMachine，这里会稳定崩；
+        // 修复后全部应即时释放。
+        weak var probe: JSEngine?
+        for index in 0..<200 {
+            autoreleasepool {
+                let engine = JSEngine(host: JSEngine.Host())
+                _ = engine.evaluateString("'src" + String(index) + "'")
+                if index == 0 { probe = engine }
+            }
+        }
+        XCTAssertNil(probe, "批量创建的 JSEngine 未释放，多源搜索会累积内存并闪退")
+    }
+
+    func testJSEngineStillWorksAfterWeakContextRefactor() {
+        // 弱引用改造后功能不能退化：java / source / cookie / cache 都要可用。
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("java.md5Encode('abc')"),
+                       "900150983cd24fb0d6963f7d28e17f72")
+        XCTAssertEqual(engine.evaluateString("java.base64Encode('hi')"), "aGk=")
+        XCTAssertEqual(engine.evaluateString("java.base64Decode('aGk=')"), "hi")
+        XCTAssertEqual(engine.evaluateString("(function(){ var c = cache; return typeof c.put; })()"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof source.getKey"), "function")
+    }
 }
