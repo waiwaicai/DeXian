@@ -109,14 +109,19 @@ enum Charset {
     static func decode(_ data: Data, preferred: String.Encoding? = nil) -> String {
         if data.isEmpty { return "" }
 
-        if let encoding = preferred, let text = decodeStrict(data, encoding) {
-            return cleanDecoded(text)
-        }
+        // BOM 是作者显式声明的，优先级最高
         if let encoding = fromBOM(data), let text = decodeStrict(data, encoding) {
             return cleanDecoded(text)
         }
-        // UTF-8 严格校验通过就采用：这是中文站点的绝大多数情况
+        // UTF-8 严格校验优先于「服务器声明的字符集」。
+        //
+        // 很多站点的 Content-Type 写死 charset=gbk，正文却已经是 UTF-8，
+        // 若先信声明就会把 UTF-8 字节按 GBK 解码，整篇变成「锟斤拷」式乱码。
+        // 反过来（真 GBK 页面）在 UTF-8 校验里必然失败，不会误判。
         if isValidUTF8(data), let text = String(data: data, encoding: .utf8) {
+            return cleanDecoded(text)
+        }
+        if let encoding = preferred, let text = decodeStrict(data, encoding) {
             return cleanDecoded(text)
         }
         if let encoding = fromHTMLMeta(data), let text = decodeStrict(data, encoding) {
