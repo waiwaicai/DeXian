@@ -23,6 +23,10 @@ final class SearchViewModel: ObservableObject {
     @Published private(set) var skippedSourceCount = 0
     /// 已渲染的书源结果数：结果很多时只渲染前一段
     @Published private(set) var renderLimit = 40
+    /// 本轮已完成的书源数（含成功与失败），用于界面显示搜索进度
+    @Published private(set) var finishedCount = 0
+    /// 本轮参与搜索的书源总数
+    @Published private(set) var searchedSourceCount = 0
 
     enum Scope: String, CaseIterable {
         case all = "全部"
@@ -32,13 +36,30 @@ final class SearchViewModel: ObservableObject {
     }
 
     private var searchTask: Task<Void, Never>?
+    /// sourceId -> results 下标。
+    ///
+    /// 书源上千时，若每次都线性扫描找下标，完成一个源就是 O(N)，
+    /// 整轮下来 O(N²)，在主线程上累积成肉眼可见的卡顿。
+    private var resultIndex: [String: Int] = [:]
+    /// 可见结果（有书 / 有错 / 加载中）的缓存。
+    ///
+    /// 每完成一个书源都会触发界面求值，如果在求值里对几千条结果做全量
+    /// filter，整轮搜索就是 O(N²)，在主线程上累积成明显卡顿。
+    /// 这里改成惰性重建：写回只置脏标记，真正读取时才重算一次，
+    /// 于是每帧最多重算一次，与完成次数无关。
+    private var visibleCache: [SourceResult] = []
+    private var visibleDirty = true
 
     /// 同时抓取的书源数量上限。
     ///
-    /// 书源动辄几百个：如果每个源都立刻起一个任务，就会同时创建几百个
-    /// JSVirtualMachine（每个源一个），内存瞬间飙升被系统强杀。
-    /// 10 个既能跑满网络，JSVM 数量也远低于危险线。
-    private let concurrentLimit = 5
+    /// 每个书源会建一个 JSVirtualMachine，同时开几百个必然被系统强杀，
+    /// 所以必须有闸门。但推进到 8 是安全的：
+    /// JSVirtualMachine 是共享堆，「每个源一个实例」并不会各占一份堆内存；
+    /// 真正吃内存的是同时在飞的那几个响应体，而 8 个页面体量很小。
+    /// 更关键的是 JSEngine.evaluate 内部把所有求值串行化到同一条队列上，
+    /// 所以提高这个数字不会让 JS 侧并发度上升，只是让网络等待并行起来 ——
+    /// 这正是「几百个源要跑到天亮」的真正瓶颈。
+    private let concurrentLimit = 8
 
     /// 单个书源的抓取上限。
     ///
@@ -50,22 +71,19 @@ final class SearchViewModel: ObservableObject {
     /// 取值必须高于「单次 HTTP 请求的上限」（HTTPClient 里是 30s，
     /// fetchContent 还会把它抬到至少 30s）。若设得比请求超时还短，
     /// 那些「慢但能用」的源会被这里提前掐断，又变成假的「全部超时」。
-    /// 40s 只用来兜住真正卡死的源（脚本死循环、回调挂起）。
-    private let perSourceTimeout: TimeInterval = 40
+    /// 这里必须高于「单次请求超时」，而且要高过重试后的总耗时：
+    /// fetchContent 把超时抬到 30s，并且超时后还会重试一次，
+    /// 也就是说一个源最坏要 60s 才走完。原先设 40s，等于把
+    /// 「慢但完全能用」的源提前掐断，用户看到的就是「怎么搜都超时」。
+    /// 70s 只用来兜住真正卡死的源（脚本死循环、回调挂起）。
+    private let perSourceTimeout: TimeInterval = 70
 
-    /// 单次搜索最多使用的书源数量。
+    /// 结果卡片的渲染上限。
     ///
-    /// 书源上千时，即使并发只有 5 也要排队几十分钟；更糟的是
-    /// 结果占位会一次性生成上千个 SwiftUI 视图，内存直接爆掉。
-    /// 这里取前 N 个，其余在界面上明确提示「已跳过」，
-    /// 用户可在书源管理里禁用不需要的源来聚焦搜索范围。
-    private let maxSourcesPerSearch = 120
-
-    /// 整轮搜索的上限：按「源数量 / 并发数 × 单源上限」估算，再留一倍余量。
-    private func deadline(for total: Int) -> TimeInterval {
-        let wave = Double(total) / Double(concurrentLimit)
-        return min(max(90, wave * perSourceTimeout * 2), 600)
-    }
+    /// 这里才是真正需要设闸门的地方：几千个书源若一次性铺成页面，
+    /// SwiftUI 会为每个卡片建视图树，内存直接爆掉。
+    /// 搜索本身不设数量上限（全部书源都会跑），但界面按需增量渲染。
+    private let initialRenderLimit = 40
 
     /// 给单个操作加超时：超时后按失败处理，不会让源永远停在「加载中」。
     ///
@@ -126,31 +144,32 @@ final class SearchViewModel: ObservableObject {
             skippedSourceCount = 0
             return
         }
-        // 数量闸门：书源上千时按顺序取前 N 个，
-        // 既避免排队几十分钟，也避免一次性生成上千个结果卡片。
-        let selected = candidates.count > maxSourcesPerSearch
-            ? Array(candidates.prefix(maxSourcesPerSearch))
-            : candidates
-        skippedSourceCount = max(0, candidates.count - selected.count)
+        // 全部书源都参与搜索：不再截断前 N 个。
+        // 用户要的是「一次搜完」，按数量砍掉一半书源对他没有意义。
+        let selected = candidates
+        skippedSourceCount = 0
 
         searchTask?.cancel()
         isSearching = true
 
-        renderLimit = 40
+        renderLimit = initialRenderLimit
+        finishedCount = 0
+        searchedSourceCount = selected.count
         // 先占位，界面立刻能看到每个源的状态
         results = selected.map { source in
             SourceResult(sourceId: source.id, sourceName: source.name, type: source.type,
                          books: [], error: nil, isLoading: true)
         }
+        resultIndex.removeAll(keepingCapacity: true)
+        resultIndex.reserveCapacity(results.count)
+        for (offset, result) in results.enumerated() { resultIndex[result.sourceId] = offset }
+        visibleDirty = true
 
         let perSource = perSourceTimeout
         searchTask = Task { [weak self] in
             guard let self else { return }
             let limit = self.concurrentLimit
             let total = selected.count
-            let started = Date()
-            let timeLimit = self.deadline(for: total)
-            func outOfTime() -> Bool { Date().timeIntervalSince(started) > timeLimit }
             await withTaskGroup(of: (String, Result<[SearchBook], Error>).self) { group in
                 // 滑动窗口：最多 limit 个源同时抓取，完成一个再补一个，
                 // 避免几百个源同时建 JSVirtualMachine 把内存打爆。
@@ -176,7 +195,7 @@ final class SearchViewModel: ObservableObject {
                         break
                     }
                     self.apply(sourceId: sourceId, outcome: outcome)
-                    if next < total, !outOfTime() {
+                    if next < total {
                         let source = selected[next]
                         next += 1
                         group.addTask {
@@ -201,8 +220,10 @@ final class SearchViewModel: ObservableObject {
 
     /// 把仍在加载中的条目标记为完成（用于超时 / 取消后的收尾）。
     private func finishPending() {
+        visibleDirty = true
         for index in results.indices where results[index].isLoading {
             results[index].isLoading = false
+            finishedCount += 1
             if results[index].books.isEmpty, results[index].error == nil {
                 results[index].error = "未搜索（已停止）"
             }
@@ -216,7 +237,9 @@ final class SearchViewModel: ObservableObject {
     }
 
     private func apply(sourceId: String, outcome: Result<[SearchBook], Error>) {
-        guard let index = results.firstIndex(where: { $0.sourceId == sourceId }) else { return }
+        guard let index = resultIndex[sourceId], results.indices.contains(index) else { return }
+        if results[index].isLoading { finishedCount += 1 }
+        visibleDirty = true
         switch outcome {
         case .success(let books):
             // 过滤空结果并按 id 去重：同一本书重复出现会让 ForEach 崩溃
@@ -244,15 +267,30 @@ final class SearchViewModel: ObservableObject {
         return scoped.filter { seen.insert($0.id).inserted }
     }
 
-    /// 结果按书源分组展示（分页渲染，避免一次构建上千个卡片）
+    /// 结果按书源分组展示（分页渲染，避免一次构建上千个卡片）。
+    ///
+    /// 搜索期间的结果数组可能有几千条：这里只保留「有书或有错」的条目，
+    /// 再按渲染上限截断。返回的是数组副本，因此界面不会因为后台写回
+    /// 原始数组而反复重建视图树。
     var groupedResults: [SourceResult] {
-        let visible = results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }
+        let visible = visibleResults
         return visible.count > renderLimit ? Array(visible.prefix(renderLimit)) : visible
     }
 
     /// 当前筛选下可见的结果总数（用于「加载更多」文案）
     var visibleResultCount: Int {
-        results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }.count
+        visibleResults.count
+    }
+
+    /// 有内容的结果（有书、有错、或仍在加载）。
+    ///
+    /// 惰性重建：脏标记被置起时才重算，避免每次完成书源都全量 filter。
+    private var visibleResults: [SourceResult] {
+        if visibleDirty {
+            visibleCache = results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }
+            visibleDirty = false
+        }
+        return visibleCache
     }
 
     /// 追加渲染更多结果卡片

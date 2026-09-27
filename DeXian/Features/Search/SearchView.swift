@@ -121,14 +121,21 @@ struct SearchView: View {
     private var resultList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                if viewModel.skippedSourceCount > 0 {
-                    Text("本轮搜索使用前 " + String(viewModel.results.count)
-                         + " 个书源，另有 " + String(viewModel.skippedSourceCount)
-                         + " 个未参与。可在「书源管理」里禁用不需要的源。")
-                        .font(.themeTiny)
-                        .foregroundStyle(Theme.ColorToken.textTertiary)
-                        .padding(.horizontal, Theme.Spacing.page)
-                        .padding(.top, Theme.Spacing.md)
+                // 全部书源都会参与搜索，这里显示实时进度
+                // （几千个源要跑一会儿，没有进度条会让人以为卡死）
+                if viewModel.isSearching, viewModel.searchedSourceCount > 0 {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        ProgressView(value: Double(viewModel.finishedCount),
+                                     total: Double(max(1, viewModel.searchedSourceCount)))
+                            .tint(Theme.Palette.brand)
+                        Text(String(viewModel.finishedCount) + "/"
+                             + String(viewModel.searchedSourceCount))
+                            .font(.themeTiny)
+                            .foregroundStyle(Theme.ColorToken.textTertiary)
+                            .monospacedDigit()
+                    }
+                    .padding(.horizontal, Theme.Spacing.page)
+                    .padding(.top, Theme.Spacing.md)
                 }
 
                 ForEach(viewModel.groupedResults) { result in
@@ -235,7 +242,10 @@ struct SearchView: View {
         if viewModel.isSearching {
             VStack {
                 Spacer()
-                LoadingView(text: "正在搜索各书源")
+                LoadingView(text: viewModel.searchedSourceCount > 0
+                            ? "正在搜索 " + String(viewModel.searchedSourceCount) + " 个书源（"
+                              + String(viewModel.finishedCount) + " 已完成）"
+                            : "正在搜索各书源")
                 Spacer()
             }
         } else if !viewModel.keyword.isEmpty {
