@@ -81,7 +81,11 @@ struct ReaderView: View {
         }
         .task {
             await viewModel.loadTocIfNeeded()
-            if viewModel.content.isEmpty, !viewModel.chapters.isEmpty {
+            // 不能要求 chapters 非空：漫画源没有目录时，
+            // loadTocIfNeeded() 会走单章兜底，此时目录仍为空、
+            // 但正文/图片其实已经取回来了。旧条件会把这种情况挡在门外，
+            // 表现就是封面一直转圈、内容永远出不来。
+            if viewModel.content.isEmpty, viewModel.images.isEmpty {
                 await viewModel.loadContent(index: viewModel.currentIndex)
             }
             if !viewModel.isAudio {
