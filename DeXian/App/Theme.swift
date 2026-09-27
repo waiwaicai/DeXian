@@ -146,3 +146,20 @@ extension UIColor {
         )
     }
 }
+
+// MARK: - Bundle
+
+extension Bundle {
+    /// 当前版本号（如 1.0.2）
+    var shortVersion: String {
+        (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0"
+    }
+
+    /// 构建号
+    var buildNumber: String {
+        (infoDictionary?["CFBundleVersion"] as? String) ?? "1"
+    }
+
+    /// 版本 + 构建号，用于「关于」页展示
+    var fullVersion: String { shortVersion + " (" + buildNumber + ")" }
+}
