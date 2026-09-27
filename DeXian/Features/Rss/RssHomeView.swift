@@ -12,7 +12,9 @@ struct RssHomeView: View {
         ZStack {
             Theme.ColorToken.background.ignoresSafeArea()
 
-            if rss.sources.isEmpty {
+            if !rss.isLoaded {
+                VStack { Spacer(); LoadingView(text: "正在加载订阅源"); Spacer() }
+            } else if rss.sources.isEmpty {
                 EmptyStateView(
                     systemImage: "dot.radiowaves.left.and.right",
                     title: "还没有订阅源",
