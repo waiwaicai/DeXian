@@ -171,7 +171,14 @@ final class ExploreViewModel: ObservableObject {
     func select(source: BookSource) async {
         self.source = source
         selectedSourceId = source.id
-        categories = parseCategories(source.exploreUrl)
+        var parsed = parseCategories(source.exploreUrl)
+        // 有些书源的发现地址是单条 URL（不是「分类名::地址」列表），
+        // 解析不出分类时兜底成一个「全部」入口，否则整页什么都点不动。
+        let raw = source.exploreUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        if parsed.isEmpty, !raw.isEmpty, !raw.hasPrefix("[") {
+            parsed = [ExploreCategory(dict: ["title": "全部", "url": raw])]
+        }
+        categories = parsed
         books = []
         errorMessage = nil
         isFinished = false
@@ -202,7 +209,12 @@ final class ExploreViewModel: ObservableObject {
     }
 
     private func loadPage(reset: Bool) async {
-        guard let source, let category, let url = category.url else { return }
+        guard let source, let category else { return }
+        guard let url = category.url, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "该分类没有可用地址"
+            isLoading = false
+            return
+        }
         isLoading = true
         defer { isLoading = false }
 
