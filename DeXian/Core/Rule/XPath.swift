@@ -72,11 +72,17 @@ enum XPathEngine {
     }
 
     private static func collectStringValue(_ node: HTMLNode, into buffer: inout String) {
+        collectStringValue(node, into: &buffer, depth: 0)
+    }
+
+    /// 与解析器同理：深层嵌套的 DOM 递归也会撞穿线程栈。
+    private static func collectStringValue(_ node: HTMLNode, into buffer: inout String, depth: Int) {
+        guard depth < 256 else { return }
         for child in node.children {
             switch child.kind {
             case .text: buffer += child.text
             case .comment: break
-            default: collectStringValue(child, into: &buffer)
+            default: collectStringValue(child, into: &buffer, depth: depth + 1)
             }
         }
     }
@@ -358,10 +364,43 @@ struct XPathParser {
     let contextOverride: [HTMLNode]?
     private var index = 0
 
+    /// 表达式解析的递归深度。
+    ///
+    /// 语法是递归下降，而规则文本来自第三方书源，内容不受控：
+    /// 形如 "- - - - ...(几千个负号)" 或 "((((((...))))))" 的表达式会让
+    /// 递归栈直接撞穿线程栈 —— 那是硬件级错误，Swift 的 do/catch 抓不住，
+    /// 进程当场硬崩且不产生任何可读崩溃报告。
+    /// 因此每层下降前计数，超限就终止解析并返回空表达式。
+    private var depth = 0
+
+    /// 递归下降的最大层数。
+    ///
+    /// 不要调大：递归下降每推进一层要穿过约 10 个解析函数，
+    /// 层数乘以 10 才是真实栈帧数。搜索跑在后台线程上，栈只有几百 KB，
+    /// 256 层会堆到约 2500 帧，本身就有溢出风险。
+    /// 真实书源规则的手写嵌套不会超过个位数，64 已经非常宽松。
+    static let maxDepth = 64
+
     init(tokens: [XPathToken], document: HTMLNode, contextOverride: [HTMLNode]? = nil) {
         self.tokens = tokens
         self.document = document
         self.contextOverride = contextOverride
+    }
+
+    /// 进入一层递归。返回 false 表示已超限，调用方必须立即返回。
+    ///
+    /// 超限时**不**递增计数：调用方拿到 false 会直接 return，
+    /// 不会走到配对的 leave()，若这里先加后判就会把计数永久抬高，
+    /// 后续同级子表达式全部被误判成超限。
+    private mutating func enter() -> Bool {
+        let next = depth + 1
+        guard next <= XPathParser.maxDepth else { return false }
+        depth = next
+        return true
+    }
+
+    private mutating func leave() {
+        depth -= 1
     }
 
     // MARK: 入口
@@ -392,10 +431,17 @@ struct XPathParser {
     }
 
     mutating func parseExpression() -> XPathExpression {
-        parseOr()
+        // 刻意不在这里重置 depth：
+        // parsePredicate / parsePrimary 也会回调这个方法，
+        // 一旦重置，形如 "//a[//b[//c[...]]]" 的深层括号就能
+        // 在每一层把计数清零，深度上限形同虚设。
+        // 解析器每次都是新建的，depth 天然从 0 开始，无需重置。
+        return parseOr()
     }
 
     private mutating func parseOr() -> XPathExpression {
+        guard enter() else { return .empty }
+        defer { leave() }
         var left = parseAnd()
         while consumeOperatorName("or") {
             let right = parseAnd()
@@ -469,6 +515,8 @@ struct XPathParser {
     }
 
     private mutating func parseUnary() -> XPathExpression {
+        guard enter() else { return .empty }
+        defer { leave() }
         if match(.minus) {
             return .negate(parseUnary())
         }

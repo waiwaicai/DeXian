@@ -268,29 +268,56 @@ enum JSONPath {
         }
     }
 
-    private static func collectRecursive(item: Any, key: String, into results: inout [Any]) {
+    /// 递归收集的最大层数。
+    ///
+    /// 书源规则里的 `$..` 会深度遍历整份 JSON。这份 JSON 完全来自第三方接口，
+    /// 深度不受控：一旦出现几千层嵌套，递归就会撞穿线程栈。
+    /// 栈溢出是硬件级错误，Swift 的 do/catch 抓不住，进程当场硬崩，
+    /// 连崩溃报告都来不及写 —— 表现就是「某个书源一搜就闪退」。
+    static let maxDepth = 128
+
+    /// 单次收集的结果上限。
+    ///
+    /// `$..*` 作用在几 MB 的 JSON 上会产出百万级条目，全部留在内存里
+    /// 足以触发系统 Jetsam 强杀。真实规则只需要几十条，这里留足余量。
+    private static let maxResults = 20_000
+
+    private static func collectRecursive(item: Any, key: String, into results: inout [Any], depth: Int = 0) {
+        guard depth < maxDepth, results.count < maxResults else { return }
         if let dictionary = item as? [String: Any] {
             if let value = dictionary[key] { results.append(value) }
-            for value in dictionary.values { collectRecursive(item: value, key: key, into: &results) }
-            return
-        }
-        if let array = item as? [Any] {
-            for value in array { collectRecursive(item: value, key: key, into: &results) }
-        }
-    }
-
-    private static func collectAllDescendants(item: Any, into results: inout [Any]) {
-        if let dictionary = item as? [String: Any] {
+            // 循环里也要查上限：只靠函数入口的守卫时，
+            // 一个「宽而浅」的大数组会在同一层把结果撑爆，
+            // 递归守卫根本来不及生效。
             for value in dictionary.values {
-                results.append(value)
-                collectAllDescendants(item: value, into: &results)
+                guard results.count < maxResults else { return }
+                collectRecursive(item: value, key: key, into: &results, depth: depth + 1)
             }
             return
         }
         if let array = item as? [Any] {
             for value in array {
+                guard results.count < maxResults else { return }
+                collectRecursive(item: value, key: key, into: &results, depth: depth + 1)
+            }
+        }
+    }
+
+    private static func collectAllDescendants(item: Any, into results: inout [Any], depth: Int = 0) {
+        guard depth < maxDepth, results.count < maxResults else { return }
+        if let dictionary = item as? [String: Any] {
+            for value in dictionary.values {
+                guard results.count < maxResults else { return }
                 results.append(value)
-                collectAllDescendants(item: value, into: &results)
+                collectAllDescendants(item: value, into: &results, depth: depth + 1)
+            }
+            return
+        }
+        if let array = item as? [Any] {
+            for value in array {
+                guard results.count < maxResults else { return }
+                results.append(value)
+                collectAllDescendants(item: value, into: &results, depth: depth + 1)
             }
         }
     }
@@ -310,6 +337,12 @@ enum JSONPath {
         let tokens: [FilterToken]
         let item: Any
         var index = 0
+        /// 括号嵌套深度。parseOperand 与 parseGrouped 互相递归，
+        /// 形如 "$[?((((((...))))))]" 的规则会让递归无上限地展开。
+        var depth = 0
+
+        /// 括号嵌套上限。真实规则不会超过个位数。
+        static let maxDepth = 64
 
         init(expression: String, item: Any) {
             var lexer = FilterLexer(expression: expression)
@@ -359,6 +392,9 @@ enum JSONPath {
         }
 
         mutating func parseOperand() -> FilterValue {
+            guard depth < JSONPath.FilterParser.maxDepth else { return .missing }
+            depth += 1
+            defer { depth -= 1 }
             guard let token = advance() else { return .missing }
             switch token {
             case .atPath(let path), .rootPath(let path):
