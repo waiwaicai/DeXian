@@ -817,6 +817,38 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertFalse(store.showPageFooter)
     }
 
+    // MARK: 漫画源入口（无目录也能进）
+
+    /// 漫画源不提供目录是常态：整本就是一个阅读页。
+    /// 只要能拿到书籍地址，就必须允许进入阅读，
+    /// 否则详情页的按钮永远是灰的，用户根本点不进去。
+    func testComicCanOpenWithoutTocWhenBookUrlExists() {
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .image, tocUrl: nil, bookUrl: "https://a.com/comic/1"))
+    }
+
+    func testComicCanOpenWithoutTocWhenOnlyTocUrlExists() {
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .image, tocUrl: "https://a.com/comic/1", bookUrl: ""))
+    }
+
+    /// 两个地址都拿不到时不能放行：进去只会是一张空白页。
+    func testComicCannotOpenWhenNoAddressAtAll() {
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .image, tocUrl: nil, bookUrl: "   "))
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .image, tocUrl: "", bookUrl: ""))
+    }
+
+    /// 小说源不享受这条兜底：目录失败时进去只会看到空白，
+    /// 反而让人以为软件坏了，所以必须照旧报错。
+    func testTextSourceStillRequiresToc() {
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .text, tocUrl: nil, bookUrl: "https://a.com/book/1"))
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .audio, tocUrl: nil, bookUrl: "https://a.com/audio/1"))
+    }
+
 }
 // MARK: - 订阅源（RSS）
 
