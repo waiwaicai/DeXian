@@ -124,6 +124,33 @@ struct SettingsView: View {
                     .frame(width: 30, alignment: .trailing)
             }
 
+            HStack {
+                settingsRow(icon: "text.alignleft", color: Theme.Palette.success, title: "行距", detail: nil)
+                Spacer()
+                Slider(value: $settings.lineSpacing, in: 0...24, step: 1)
+                    .frame(maxWidth: 160)
+                Text(String(Int(settings.lineSpacing)))
+                    .font(.themeCallout)
+                    .foregroundStyle(Theme.ColorToken.textSecondary)
+                    .frame(width: 30, alignment: .trailing)
+            }
+
+            Picker(selection: $settings.fontFamily) {
+                ForEach(SettingsStore.fontFamilies, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            } label: {
+                settingsRow(icon: "character", color: Theme.Palette.brand, title: "字体", detail: nil)
+            }
+
+            Picker(selection: $settings.readerTheme) {
+                ForEach(SettingsStore.ReaderTheme.allCases, id: \.self) { item in
+                    Text(item.displayName).tag(item)
+                }
+            } label: {
+                settingsRow(icon: "circle.righthalf.filled", color: Theme.Palette.warning, title: "阅读配色", detail: nil)
+            }
+
             Toggle(isOn: $settings.comicFitWidth) {
                 settingsRow(icon: "photo", color: Theme.Palette.warning, title: "漫画适应宽度", detail: nil)
             }
@@ -170,7 +197,7 @@ struct SettingsView: View {
             HStack {
                 settingsRow(icon: "info.circle", color: Theme.ColorToken.textTertiary, title: "版本", detail: nil)
                 Spacer()
-                Text("1.0.0")
+                Text(Bundle.main.fullVersion)
                     .font(.themeCallout)
                     .foregroundStyle(Theme.ColorToken.textSecondary)
             }
