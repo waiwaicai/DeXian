@@ -2,6 +2,12 @@ import SwiftUI
 
 @main
 struct DeXianApp: App {
+    init() {
+        // 最早时机安装崩溃捕获：越早越好，启动阶段的闪退也能留下现场。
+        FileStorage.prepareDirectory()
+        CrashReporter.install()
+    }
+
     @StateObject private var appState = AppState()
     @StateObject private var webAuth = WebAuthPresenter.shared
 
@@ -20,13 +26,25 @@ struct DeXianApp: App {
                 .tint(Theme.Palette.brand)
                 // 写盘有 300ms 合并窗口；被挂起前必须刷一次，否则改动会丢
                 .onChange(of: scenePhase) { phase in
-                    guard phase != .active else { return }
+                    guard phase != .active else {
+                        CrashReporter.beginSession()
+                        return
+                    }
                     appState.flushPendingWrites()
+                    // 进后台就清掉运行标记。
+                    // iOS 会常态地回收后台应用，那是正常行为。
+                    // 不清标记的话，每次从后台回来都会误报「上次被强杀」。
+                    // 标记只在前台时保留，而前台被杀正是闪退。
+                    if phase == .background { CrashReporter.endSession() }
                 }
                 // 书源需要用户过验证 / 登录时弹出网页
                 .sheet(item: $webAuth.request) { request in
                     WebAuthView(request: request, presenter: webAuth)
                 }
+                // 启动完成后标记「本次运行开始」：
+                // 下次启动若发现标记还在，就说明上次是被系统强杀的
+                //（内存超限或看门狗），这类崩溃不会留下崩溃报告。
+                .onAppear { CrashReporter.beginSession() }
         }
     }
 }
