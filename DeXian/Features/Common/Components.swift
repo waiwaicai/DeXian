@@ -9,6 +9,8 @@ struct CoverImage: View {
     var width: CGFloat
     var height: CGFloat
     var cornerRadius: CGFloat = Theme.Radius.sm
+    /// 所属书源 id：用于带上该源的 Cookie，很多图床要登录态才给图
+    var sourceKey: String?
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -43,39 +45,189 @@ struct CoverImage: View {
 
     private func load() async {
         guard let url, !url.isEmpty, image == nil else { return }
-        if let cached = ImageCache.shared.image(for: url) {
-            image = cached
-            return
-        }
-        do {
-            let data = try await HTTPClient.shared.data(urlString: url, headers: ["Referer": url])
-            guard let decoded = UIImage(data: data) else {
-                failed = true
-                return
-            }
-            ImageCache.shared.store(decoded, for: url)
-            image = decoded
-        } catch {
+        // 封面只需按显示尺寸解码：原图动辄 2000x3000，全尺寸解码一张就是几十 MB，
+        // 列表里滚几十张必然被系统以内存超限杀掉。
+        let pixel = max(width, height)
+        let loaded = await ImageLoader.shared.image(
+            url: url,
+            maxPixel: pixel,
+            referer: url,
+            sourceKey: sourceKey
+        )
+        if let loaded {
+            image = loaded
+        } else {
             failed = true
         }
     }
 }
 
-/// 内存图片缓存
-final class ImageCache {
-    static let shared = ImageCache()
-    private let cache = NSCache<NSString, UIImage>()
-    private init() {
-        cache.countLimit = 200
-        cache.totalCostLimit = 64 * 1024 * 1024
-    }
-
-    func image(for key: String) -> UIImage? { cache.object(forKey: key as NSString) }
-
-    func store(_ image: UIImage, for key: String) {
-        cache.setObject(image, forKey: key as NSString)
+/// 图片解码：统一走 ImageIO 下采样。
+///
+/// `UIImage(data:)` 会把原图按原始分辨率完整解码到内存，
+/// 遇到超大图或畸形 PNG 会瞬间申请上百 MB 内存直接 OOM。
+/// 先按目标像素尺寸生成缩略图，内存占用与显示尺寸挂钩。
+enum ImageDecoder {
+    static func downsample(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard !data.isEmpty else { return nil }
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        let scale = UIScreen.main.scale > 0 ? UIScreen.main.scale : 2
+        let limit = max(1, maxPixel * scale)
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: limit
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
     }
 }
+
+/// 内存图片缓存。
+///
+/// 关键点：写入时必须带 cost。NSCache 只有在对象带 cost 时才按字节数计数，
+/// 否则 totalCostLimit 形同虚设，只靠 countLimit 兜底，
+/// 200 张原图足以把内存顶到 1GB 以上被系统强杀。
+final class ImageCache {
+    static let shared = ImageCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+    /// 失败记录：避免列表来回滚动时反复重试同一张坏图
+    private var failedAt: [String: Date] = [:]
+    private let lock = NSLock()
+    private let failedTTL: TimeInterval = 90
+
+    private init() {
+        cache.countLimit = 150
+        cache.totalCostLimit = 48 * 1024 * 1024
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.removeAll()
+        }
+    }
+
+    func image(for key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func store(_ image: UIImage, for key: String) {
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+        cache.setObject(image, forKey: key as NSString, cost: cost)
+        lock.lock()
+        failedAt[key] = nil
+        lock.unlock()
+    }
+
+    func markFailed(_ key: String) {
+        lock.lock()
+        failedAt[key] = Date()
+        lock.unlock()
+    }
+
+    func isFailed(_ key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let date = failedAt[key] else { return false }
+        if Date().timeIntervalSince(date) > failedTTL {
+            failedAt[key] = nil
+            return false
+        }
+        return true
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+        lock.lock()
+        failedAt.removeAll()
+        lock.unlock()
+    }
+}
+
+/// 图片加载器：同一地址的并发请求合并成一次网络请求，
+/// 并负责 Referer 兜底与失败负缓存。
+@MainActor
+final class ImageLoader {
+    static let shared = ImageLoader()
+
+    private var running: [String: Task<UIImage?, Never>] = [:]
+
+    func image(
+        url: String,
+        maxPixel: CGFloat,
+        referer: String,
+        sourceKey: String? = nil
+    ) async -> UIImage? {
+        let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        let key = value + "|" + String(Int(maxPixel))
+        if let cached = ImageCache.shared.image(for: key) { return cached }
+        if ImageCache.shared.isFailed(key) { return nil }
+        if let task = running[key] { return await task.value }
+
+        let task = Task<UIImage?, Never> {
+            let result = await ImageLoader.fetch(
+                url: value, maxPixel: maxPixel, referer: referer, sourceKey: sourceKey
+            )
+            return result
+        }
+        running[key] = task
+        let loaded = await task.value
+        running[key] = nil
+
+        if let loaded {
+            ImageCache.shared.store(loaded, for: key)
+        } else {
+            ImageCache.shared.markFailed(key)
+        }
+        return loaded
+    }
+
+    /// 依次尝试「章节页 Referer → 站点根 Referer」，
+    /// 很多图床只认自己站点，Referer 给图片自身地址会直接 403。
+    private static func fetch(
+        url: String,
+        maxPixel: CGFloat,
+        referer: String,
+        sourceKey: String?
+    ) async -> UIImage? {
+        for candidate in candidateReferers(referer: referer, imageURL: url) {
+            var headers: [String: String] = [:]
+            if !candidate.isEmpty { headers["Referer"] = candidate }
+            if let data = try? await HTTPClient.shared.data(
+                urlString: url,
+                headers: headers,
+                sourceKey: sourceKey,
+                kind: .image
+            ), let image = ImageDecoder.downsample(data, maxPixel: maxPixel) {
+                return image
+            }
+        }
+        return nil
+    }
+
+    private static func candidateReferers(referer: String, imageURL: String) -> [String] {
+        var results: [String] = []
+        let trimmed = referer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed != imageURL { results.append(trimmed) }
+        if let root = siteRoot(of: imageURL), !results.contains(root) { results.append(root) }
+        if results.isEmpty { results.append("") }
+        return results
+    }
+
+    private static func siteRoot(of value: String) -> String? {
+        guard let url = URL(string: value), let scheme = url.scheme, let host = url.host else { return nil }
+        return scheme + "://" + host + "/"
+    }
+}
+
 
 // MARK: 标签
 
