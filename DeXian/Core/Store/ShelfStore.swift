@@ -25,9 +25,21 @@ final class ShelfStore: ObservableObject {
         return books.filter { $0.groupId == groupId }
     }
 
-    func contains(bookUrl: String, origin: String) -> Bool {
-        let id = origin + "|" + bookUrl
+    func contains(bookUrl: String, origin: String, name: String = "", author: String = "") -> Bool {
+        let id = ShelfBook.identifier(origin: origin, bookUrl: bookUrl, name: name, author: author)
         return books.contains { $0.id == id }
+    }
+
+    /// 找不到完全匹配时，再按「书源 + 书名 + 作者」兜底查找。
+    ///
+    /// 空地址的 api 书源在补丁前会以「书源|空地址」入库，
+    /// 现在写入用的是带书名的新 id，需要能把这个旧条目找回来。
+    func book(origin: String, bookUrl: String, name: String, author: String) -> ShelfBook? {
+        let id = ShelfBook.identifier(origin: origin, bookUrl: bookUrl, name: name, author: author)
+        if let exact = books.first(where: { $0.id == id }) { return exact }
+        return books.first {
+            $0.origin == origin && $0.name == name && $0.author == author
+        }
     }
 
     // MARK: 写入

@@ -34,7 +34,9 @@ final class RssStore: ObservableObject {
 
     private func load() {
         if let stored = FileStorage.load([RssSource].self, from: fileName) {
-            sources = stored
+            // 同上：订阅源列表也按 id 去重，避免 ForEach 重复 id 崩溃。
+            var seen = Set<String>()
+            sources = stored.filter { seen.insert($0.id).inserted }
             rebuildIndex()
         }
         rebuildGroups()

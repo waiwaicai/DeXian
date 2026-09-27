@@ -41,7 +41,10 @@ final class SourceStore: ObservableObject {
 
     private func load() {
         if let stored = FileStorage.load([BookSource].self, from: fileName) {
-            sources = stored
+            // 去重后再入库：历史版本可能写入了 id 重复的书源，
+            // 一旦列表里出现重复 id，SwiftUI 的 ForEach 会直接 fatalError 崩溃。
+            var seen = Set<String>()
+            sources = stored.filter { seen.insert($0.id).inserted }
             rebuildIndex()
         }
         rebuildGroups()
