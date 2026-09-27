@@ -242,9 +242,12 @@ struct SettingsView: View {
 /// 调试日志
 struct LogViewerView: View {
     @State private var entries: [Log.Entry] = []
+    @State private var crash: String?
 
     var body: some View {
         List {
+            crashSection
+
             if entries.isEmpty {
                 Text("暂无日志")
                     .font(.themeCallout)
@@ -283,7 +286,32 @@ struct LogViewerView: View {
         .onAppear { reload() }
     }
 
+    /// 上次闪退的现场。没有崩溃时整段不显示。
+    @ViewBuilder
+    private var crashSection: some View {
+        if let crash {
+            Section {
+                ScrollView {
+                    Text(crash)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.ColorToken.textSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 320)
+
+                Button("清除崩溃记录", role: .destructive) {
+                    CrashReporter.clear()
+                    reload()
+                }
+            } header: {
+                Text("上次闪退现场")
+            }
+        }
+    }
+
     private func reload() {
         entries = Log.recent.reversed()
+        crash = CrashReporter.lastReport
     }
 }
