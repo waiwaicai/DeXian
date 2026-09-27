@@ -570,8 +570,11 @@ enum SourceImporter {
 
     static func merge(existing: [BookSource], incoming: [BookSource]) -> (result: [BookSource], added: Int, updated: Int) {
         var indexMap: [String: Int] = [:]
-        var merged = existing
-        for (offset, source) in existing.enumerated() {
+        // 先给已有数据去重：历史版本可能写下 id 重复的书源，
+        // 重复 id 进入 SwiftUI 列表会直接 fatalError 崩溃。
+        var existingSeen = Set<String>()
+        var merged = existing.filter { existingSeen.insert($0.id).inserted }
+        for (offset, source) in merged.enumerated() {
             indexMap[source.id] = offset
         }
         var added = 0
