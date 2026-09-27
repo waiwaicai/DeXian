@@ -28,7 +28,9 @@ struct ReaderView: View {
 
             contentArea
 
-            // 轻点显示菜单，再次轻点隐藏；双击直接翻到下一章
+            // 轻点分区层：夹在内容与浮层之间。
+            // 只有点击手势、没有拖动识别，所以下面的正文与漫画照常滚动；
+            // 又位于 chromeOverlay 之下，底部按钮的点击不会被它截走。
             tapLayer
 
             if showChrome {
@@ -38,7 +40,11 @@ struct ReaderView: View {
             }
         }
         .navigationBarBackButtonHidden(true)
-        .toolbar(showChrome ? .visible : .hidden, for: .navigationBar)
+        // 导航栏常驻。
+        // 原先随 showChrome 显示/隐藏会改变顶部安全区，正文被迫重排，
+        // 看上去就是「一点正文，字号和排序全变了」。改为常驻后布局稳定，
+        // showChrome 只控制底部工具条。
+        .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbarContent }
         .onChange(of: viewModel.currentIndex) { _ in
             scrollTick &+= 1
@@ -83,17 +89,41 @@ struct ReaderView: View {
 
     // MARK: 手势层
 
+    /// 轻点分区层。
+    ///
+    /// 用 SpatialTapGesture 取点击坐标：带 (CGPoint) -> Void 的
+    /// onTapGesture 重载要 iOS 17，本工程部署目标是 iOS 16。
     private var tapLayer: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                guard !showChrome, !isAudioSurface else { return }
-                Task { await viewModel.goNext() }
-            }
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
-            }
-            .ignoresSafeArea(edges: .bottom)
+        GeometryReader { geometry in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    SpatialTapGesture()
+                        .onEnded { value in
+                            handleTap(x: value.location.x / max(geometry.size.width, 1))
+                        }
+                )
+        }
+        .ignoresSafeArea(edges: .bottom)
+    }
+
+    /// 轻点分区：左 30% 上一章、右 30% 下一章、中间 40% 收展工具条。
+    ///
+    /// 原先整屏只有一个「切换菜单」的响应，点正文永远不会翻页；
+    /// 而且翻章藏在双击里，用户根本发现不了。改成三分区后单击即可翻章。
+    private func handleTap(x: CGFloat) {
+        // 听书与漫画都是连续滚动，误触翻章体验很差，只收展工具条
+        if isAudioSurface || viewModel.isComic {
+            withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
+            return
+        }
+        if x < 0.3 {
+            Task { await viewModel.goPrevious() }
+        } else if x > 0.7 {
+            Task { await viewModel.goNext() }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
+        }
     }
 
     // MARK: 背景
@@ -167,40 +197,18 @@ struct ReaderView: View {
 
     // MARK: 阅读时浮层（点击中间区域切换）
 
+    /// 阅读浮层：只保留底部工具条。
+    ///
+    /// 顶部信息交给常驻导航栏显示。原先这里还有一条 topBar，
+    /// 与导航栏叠成两层；而且导航栏随 showChrome 显隐会改变顶部安全区，
+    /// 正文被迫重排，用户看到的就是「一弹出顶部框，字就重排/变大小」。
     private var chromeOverlay: some View {
         VStack(spacing: 0) {
-            topBar
             Spacer()
             cacheProgressBar
             bottomBar
         }
         .transition(.opacity)
-    }
-
-    private var topBar: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Text(viewModel.currentChapter?.title ?? viewModel.book.name)
-                .font(.themeHeadline)
-                .foregroundStyle(chromeTextColor)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: Theme.Spacing.sm) {
-                Text(viewModel.book.name)
-                    .font(.themeCaption)
-                    .foregroundStyle(chromeTextColor.opacity(0.7))
-                    .lineLimit(1)
-                Spacer()
-                if settings.showProgress {
-                    Text(viewModel.progressText)
-                        .font(.themeCaptionBold)
-                        .foregroundStyle(Theme.Palette.brand)
-                }
-            }
-        }
-        .padding(.horizontal, Theme.Spacing.page)
-        .padding(.vertical, Theme.Spacing.md)
-        .background(.ultraThinMaterial)
     }
 
     /// 整本缓存进度条：下载中才出现
@@ -277,6 +285,20 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // 顶部标题：章节名 + 进度。常驻显示，布局稳定。
+        ToolbarItem(placement: .principal) {
+            VStack(spacing: 1) {
+                Text(viewModel.currentChapter?.title ?? viewModel.book.name)
+                    .font(.themeCaptionBold)
+                    .foregroundStyle(Theme.ColorToken.textPrimary)
+                    .lineLimit(1)
+                if settings.showProgress {
+                    Text(viewModel.progressText)
+                        .font(.themeTiny)
+                        .foregroundStyle(Theme.ColorToken.textTertiary)
+                }
+            }
+        }
         ToolbarItem(placement: .navigationBarLeading) {
             Button {
                 dismiss()
@@ -458,6 +480,10 @@ struct ComicReaderView: View {
     /// 所属书源 id：带上该源 Cookie，登录后才能看的漫画才出图
     var sourceKey: String?
 
+    /// 已放行的页数：滚动到底再追加，避免一次性解码整章几十张原图。
+    @State private var window = 8
+    private let step = 8
+
     var body: some View {
         if images.isEmpty {
             EmptyStateView(
@@ -466,13 +492,36 @@ struct ComicReaderView: View {
                 message: "该章节未解析到图片，可能是付费章节或书源规则需要更新。"
             )
         } else {
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(images.enumerated()), id: \.offset) { _, url in
-                        ComicPageView(url: url, fitWidth: fitWidth, referer: referer, sourceKey: sourceKey)
+            ZStack(alignment: .bottom) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(images.prefix(window).enumerated()), id: \.offset) { index, url in
+                            ComicPageView(url: url, fitWidth: fitWidth, referer: referer, sourceKey: sourceKey)
+                                .onAppear {
+                                    // 快到底时再追加下一页，图像解码量始终有界
+                                    if index >= window - 2, window < images.count {
+                                        window = min(window + step, images.count)
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.top, Theme.Spacing.lg)
+                    .padding(.bottom, Theme.Spacing.xxl)
+
+                    if window < images.count {
+                        ProgressView()
+                            .padding(.vertical, Theme.Spacing.lg)
                     }
                 }
-                .padding(.top, Theme.Spacing.lg)
+
+                Text(String(min(window, images.count)) + " / " + String(images.count))
+                    .font(.themeTiny)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, Theme.Spacing.md)
+                    .padding(.vertical, Theme.Spacing.xs)
+                    .background(Capsule().fill(.black.opacity(0.45)))
+                    .padding(.bottom, Theme.Spacing.lg)
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -593,10 +642,15 @@ struct CatalogView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
+                    // 正序 / 倒序：默认正序（第 1 章在最上）
                     Button {
                         ascending.toggle()
                     } label: {
-                        Image(systemName: ascending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
+                        HStack(spacing: 4) {
+                            Image(systemName: ascending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
+                            Text(ascending ? "正序" : "倒序")
+                                .font(.themeTiny)
+                        }
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
