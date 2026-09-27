@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import DeXian
 
 final class RuleEngineTests: XCTestCase {
@@ -1141,6 +1142,141 @@ final class RssTests: XCTestCase {
         }
         let merged = SourceImporter.merge(existing: [make("一"), make("二")], incoming: [])
         XCTAssertEqual(merged.result.count, 1, "重复 id 的旧数据应被合并成一条")
+    }
+
+    // MARK: 本轮加固：大书源库与启动路径
+
+    /// 书架仓库必须异步加载：启动路径上不能同步解码大文件
+    @MainActor
+    func testShelfStoreLoadsAsynchronously() async {
+        let store = ShelfStore()
+        // init 里绝不能做同步 IO，所以构造完必须立刻可用（不阻塞）
+        await store.waitUntilLoaded()
+        XCTAssertTrue(store.isLoaded, "加载完成后 isLoaded 必须为 true")
+    }
+
+    /// 书源仓库同理：init 不阻塞，加载后 isLoaded 置位
+    @MainActor
+    func testSourceStoreLoadsAsynchronously() async {
+        let store = SourceStore()
+        await store.waitUntilLoaded()
+        XCTAssertTrue(store.isLoaded)
+        // 派生缓存必须与 sources 一致（筛选结果缓存化后不能算错）
+        XCTAssertEqual(store.searchableSources.count,
+                       store.sources.filter { $0.enabled && !$0.searchUrl.trimmed.isEmpty }.count)
+        XCTAssertEqual(store.exploreSources.count,
+                       store.sources.filter {
+                           $0.enabled && $0.enabledExplore && !$0.exploreUrl.trimmed.isEmpty
+                       }.count)
+    }
+
+    /// 订阅源仓库同理
+    @MainActor
+    func testRssStoreLoadsAsynchronously() async {
+        let store = RssStore()
+        await store.waitUntilLoaded()
+        XCTAssertTrue(store.isLoaded)
+    }
+
+    /// 翻页模式必须支持三种动画配置（回归：之前 pageTurn 完全没被使用）
+    func testPageTurnHasThreeDistinctModes() {
+        let modes = SettingsStore.PageTurn.allCases
+        XCTAssertEqual(modes.count, 4, "滚动 / 覆盖 / 平移 / 无动画")
+        XCTAssertTrue(modes.contains(.scroll))
+        XCTAssertTrue(modes.contains(.cover))
+        XCTAssertTrue(modes.contains(.slide))
+        XCTAssertTrue(modes.contains(.none))
+    }
+
+    /// 正文格式化要产出一致的文本：两种阅读模式共用
+    func testReaderTextFormattingDropsBlankLinesAndIndents() {
+        let raw = "  第一段\n\n   \n第二段  \n"
+        let indented = ReaderTextFormatting.displayText(raw, indent: true)
+        XCTAssertEqual(indented, "　　第一段\n　　第二段")
+        let plain = ReaderTextFormatting.displayText(raw, indent: false)
+        XCTAssertEqual(plain, "第一段\n第二段")
+        XCTAssertEqual(ReaderTextFormatting.displayText("", indent: true), "")
+    }
+
+    /// 顶层数组必须能按元素切分：几千个书源要分块解码，
+    /// 不能一次性把上百 MB JSON 全解到内存（那就是「一打开就闪退」的根因）。
+    func testFileStorageSplitsTopLevelArray() {
+        let json = "[{\"a\":1},{\"b\":[1,2,3]},{\"c\":\"含,逗号与}\"}]"
+        let data = Data(json.utf8)
+        let ranges = FileStorage.arrayElementRanges(data)
+        XCTAssertEqual(ranges?.count, 3, "应切出 3 个元素")
+        let pieces = (ranges ?? []).map { String(decoding: data[$0], as: UTF8.self) }
+        XCTAssertEqual(pieces[0], "{\"a\":1}")
+        XCTAssertEqual(pieces[1], "{\"b\":[1,2,3]}")
+        XCTAssertEqual(pieces[2], "{\"c\":\"含,逗号与}\"}", "字符串里的逗号和右括号不能当结构符")
+    }
+
+    /// 非数组输入要老实返回 nil，让调用方回退到整份解码
+    func testFileStorageRejectsNonArray() {
+        XCTAssertNil(FileStorage.arrayElementRanges(Data("{\"a\":1}".utf8)))
+        XCTAssertNil(FileStorage.arrayElementRanges(Data("[]".utf8)))
+        XCTAssertNil(FileStorage.arrayElementRanges(Data("".utf8)))
+    }
+
+    /// 括号出现在字符串里时，切分不能提前结束
+    func testFileStorageHandlesNestedBracketsInStrings() {
+        let json = "[{\"rule\":\"div[0]@text\"},{\"rule\":\"a(b)\"}]"
+        let ranges = FileStorage.arrayElementRanges(Data(json.utf8))
+        XCTAssertEqual(ranges?.count, 2)
+    }
+
+    /// 分页：同样的正文，字号越大页数越多；窄屏页数也更多
+    func testPageSplitterPagination() {
+        let text = Array(repeating: "得闲阅读测试正文。", count: 400).joined()
+        let base = PageSplitter.Layout(
+            font: UIFont.systemFont(ofSize: 17),
+            lineSpacing: 6,
+            paragraphSpacing: 8,
+            indent: false,
+            height: 600,
+            width: 320
+        )
+        let normal = PageSplitter.paginate(text: text, layout: base)
+        XCTAssertGreaterThan(normal.count, 1, "长文必须被切成多页")
+
+        var bigger = base
+        bigger.font = UIFont.systemFont(ofSize: 30)
+        let large = PageSplitter.paginate(text: text, layout: bigger)
+        XCTAssertGreaterThan(large.count, normal.count, "字号变大页数应增加")
+
+        var narrower = base
+        narrower.width = 160
+        let narrow = PageSplitter.paginate(text: text, layout: narrower)
+        XCTAssertGreaterThan(narrow.count, normal.count, "宽度变窄页数应增加")
+
+        // 内容不能丢：拼回来必须和原文一致（忽略空白差异）
+        let joined = normal.joined()
+        let stripped = joined.filter { !$0.isWhitespace }.count
+        XCTAssertEqual(stripped, text.filter { !$0.isWhitespace }.count, "分页不得丢字")
+    }
+
+    /// 分页边界：空文本与超小可用区域要能安全返回
+    func testPageSplitterHandlesEdgeCases() {
+        let layout = PageSplitter.Layout(
+            font: UIFont.systemFont(ofSize: 17), lineSpacing: 4, paragraphSpacing: 4,
+            indent: true, height: 600, width: 320
+        )
+        XCTAssertTrue(PageSplitter.paginate(text: "", layout: layout).isEmpty)
+        XCTAssertTrue(PageSplitter.paginate(text: "   \n  ", layout: layout).isEmpty)
+        // 无效布局直接当一页，不能死循环
+        var broken = layout
+        broken.height = 0
+        XCTAssertEqual(PageSplitter.paginate(text: "正文", layout: broken).count, 1)
+    }
+
+    /// 字体族映射要和设置里的名字对上，否则宋体/楷体排版会不一致
+    func testPageSplitterFontMapping() {
+        XCTAssertNotNil(PageSplitter.uiFont(family: "系统", size: 17))
+        XCTAssertNotNil(PageSplitter.uiFont(family: "宋体", size: 17))
+        XCTAssertNotNil(PageSplitter.uiFont(family: "楷体", size: 17))
+        XCTAssertNotNil(PageSplitter.uiFont(family: "圆体", size: 17))
+        XCTAssertNotNil(PageSplitter.uiFont(family: "等宽", size: 17))
+        XCTAssertNotNil(PageSplitter.uiFont(family: "未知字体", size: 17))
     }
 
     /// 发现分类去重：重复 id 会让 ForEach 崩溃
