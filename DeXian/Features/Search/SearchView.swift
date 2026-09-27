@@ -113,43 +113,67 @@ struct SearchView: View {
 
     // MARK: 结果
 
+    /// 每个书源一次最多渲染这么多条，超出的点「展开」再显示。
+    private let pageSize = 30
+
+    @State private var expandedSources: Set<String> = []
+
     private var resultList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: Theme.Spacing.lg, pinnedViews: [.sectionHeaders]) {
+            LazyVStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                 ForEach(viewModel.groupedResults) { result in
-                    Section {
-                        VStack(spacing: 0) {
-                            ForEach(result.books) { book in
-                                NavigationLink {
-                                    BookDetailView(searchBook: book)
-                                } label: {
-                                    SearchBookRow(book: book, showSource: false)
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button {
-                                        addToShelf(book)
-                                    } label: {
-                                        Label("加入书架", systemImage: "plus.circle")
-                                    }
-                                }
-
-                                if book.id != result.books.last?.id {
-                                    Divider()
-                                        .background(Theme.ColorToken.separator)
-                                        .padding(.leading, 74)
-                                }
-                            }
-                        }
-                        .cardStyle(padding: Theme.Spacing.md)
-                        .padding(.horizontal, Theme.Spacing.page)
-                    } header: {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                         sourceHeader(result)
+                        bookCard(result)
                     }
                 }
             }
             .padding(.bottom, Theme.Spacing.xxl)
         }
+    }
+
+    /// 单个书源的结果卡片
+    private func bookCard(_ result: SearchViewModel.SourceResult) -> some View {
+        let expanded = expandedSources.contains(result.sourceId)
+        let visible = expanded ? result.books : Array(result.books.prefix(pageSize))
+        return VStack(spacing: 0) {
+            ForEach(visible) { book in
+                NavigationLink {
+                    BookDetailView(searchBook: book)
+                } label: {
+                    SearchBookRow(book: book, showSource: false)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        addToShelf(book)
+                    } label: {
+                        Label("加入书架", systemImage: "plus.circle")
+                    }
+                }
+
+                if book.id != visible.last?.id {
+                    Divider()
+                        .background(Theme.ColorToken.separator)
+                        .padding(.leading, 74)
+                }
+            }
+
+            if !expanded, result.books.count > pageSize {
+                Button {
+                    expandedSources.insert(result.sourceId)
+                } label: {
+                    Text("展开剩余 " + String(result.books.count - pageSize) + " 本")
+                        .font(.themeCaption)
+                        .foregroundStyle(Theme.Palette.brand)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Theme.Spacing.md)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .cardStyle(padding: Theme.Spacing.md)
+        .padding(.horizontal, Theme.Spacing.page)
     }
 
     private func sourceHeader(_ result: SearchViewModel.SourceResult) -> some View {
