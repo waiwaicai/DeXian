@@ -141,10 +141,17 @@ final class ReaderViewModel: ObservableObject {
 
         let chapter = chapters[index]
 
+        // 先取消上一次还在跑的抓取。
+        // 原先只在「真正要联网」的分支里取消，于是快速翻章时，
+        // 旧任务仍会在稍后写回 content，把当前章覆盖成上一章的内容。
+        loadTask?.cancel()
+        loadTask = nil
+
         if let cached = contentCache[chapter.url] {
             content = cached.text
             images = cached.images
             state = .loaded
+            isLoadingContent = false
             return
         }
 
@@ -154,10 +161,10 @@ final class ReaderViewModel: ObservableObject {
             content = offline.text
             images = offline.images
             state = .loaded
+            isLoadingContent = false
             return
         }
 
-        loadTask?.cancel()
         isLoadingContent = true
         content = ""
         images = []
@@ -173,6 +180,7 @@ final class ReaderViewModel: ObservableObject {
 
         guard let engine else {
             state = .failed("书源缺失，请重新添加书籍")
+            isLoadingContent = false
             return
         }
         // 先恢复上次保存的变量，再抓取正文
@@ -187,7 +195,14 @@ final class ReaderViewModel: ObservableObject {
                     chapterInfo: chapterInfo,
                     chapterTitle: chapter.title
                 )
-                if Task.isCancelled { return }
+                // 已被取消，或用户已经翻到别的章节：
+                // 直接丢弃结果，绝不能写回（否则会把当前章覆盖成上一章内容）。
+                guard !Task.isCancelled, self.currentChapter?.url == chapter.url else {
+                    // 只有「自己仍是当前章」时才需要复位加载态；
+                    // 否则会把新一章正在转的加载指示器误关掉。
+                    if self.currentChapter?.url == chapter.url { self.isLoadingContent = false }
+                    return
+                }
                 self.contentCache[chapter.url] = result
                 self.content = result.text
                 self.images = result.images
@@ -208,7 +223,8 @@ final class ReaderViewModel: ObservableObject {
                     offset: 0
                 )
             } catch {
-                if Task.isCancelled { return }
+                // 同上：过期的失败不能覆盖当前章节的状态
+                guard !Task.isCancelled, self.currentChapter?.url == chapter.url else { return }
                 self.state = .failed(SourceError.describe(error))
                 self.isLoadingContent = false
             }

@@ -13,8 +13,6 @@ struct ReaderView: View {
     @State private var showCatalog = false
     @State private var showSettings = false
     @State private var showChrome = true
-    /// 章节切换令牌：变化时正文与漫画都回到顶部
-    @State private var scrollTick = 0
     /// 是否切到听书界面（文本书源也可用系统语音朗读）
     @State private var audioMode = false
 
@@ -32,7 +30,15 @@ struct ReaderView: View {
             // 只有点击手势、没有拖动识别，所以下面的正文与漫画照常滚动；
             // 又位于 chromeOverlay 之下，底部按钮的点击不会被它截走。
             tapLayer
-
+        }
+        // 浮层改用 overlay：overlay 的尺寸由父级决定，
+        // 绝不会反过来把父级撑大。
+        //
+        // 原先 bottomBar 直接放在 ZStack 里参与尺寸计算，它的固有宽度
+        // （5 个按钮 52pt + 4 段 Spacing.xl 间距）在窄屏上超过屏幕宽度，
+        // 于是整个 ZStack 被撑得比屏幕还宽，正文容器随之变宽并溢出屏幕 ——
+        // 表现就是「一点正文，字的排序和大小全变了」，右侧文字还会被裁掉。
+        .overlay(alignment: .bottom) {
             if showChrome {
                 chromeOverlay
             } else if viewModel.isComic, !viewModel.images.isEmpty {
@@ -46,8 +52,9 @@ struct ReaderView: View {
         // showChrome 只控制底部工具条。
         .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbarContent }
+        // 换章后收起工具条。只改状态，不重建视图，
+        // 所以不会再出现「翻一章就整页重排」的跳动。
         .onChange(of: viewModel.currentIndex) { _ in
-            scrollTick &+= 1
             showChrome = false
         }
         .task {
@@ -186,10 +193,11 @@ struct ReaderView: View {
                         referer: viewModel.currentChapter?.url ?? "",
                         sourceKey: viewModel.book.origin
                     )
-                    .id(scrollTick)
+                    // 仅换章时重建（用于重置已放行页数）；
+                    // 不再用全局令牌，避免每次翻章都重建整个阅读视图造成排版跳动。
+                    .id(viewModel.currentIndex)
                 } else {
                     TextReaderView(viewModel: viewModel)
-                        .id(scrollTick)
                 }
             }
         }
@@ -237,10 +245,10 @@ struct ReaderView: View {
     }
 
     private var bottomBar: some View {
-        HStack(spacing: Theme.Spacing.xl) {
+        HStack(spacing: Theme.Spacing.sm) {
             chromeButton("目录", systemImage: "list.bullet") { showCatalog = true }
 
-            Spacer()
+            Spacer(minLength: Theme.Spacing.xs)
 
             chromeButton("上一章", systemImage: "chevron.left") {
                 Task { await viewModel.goPrevious() }
@@ -252,7 +260,7 @@ struct ReaderView: View {
             }
             .disabled(viewModel.currentIndex >= viewModel.chapters.count - 1)
 
-            Spacer()
+            Spacer(minLength: Theme.Spacing.xs)
 
             if viewModel.isAudio {
                 chromeButton("隐藏", systemImage: "chevron.down") { showChrome = false }
@@ -264,8 +272,11 @@ struct ReaderView: View {
                 chromeButton("界面", systemImage: "textformat.size") { showSettings = true }
             }
         }
-        .padding(.horizontal, Theme.Spacing.xl)
-        .padding(.vertical, Theme.Spacing.md)
+        // 工具条必须能收进屏幕：5 个按钮在窄屏（SE 320pt）上按 52pt 最小宽
+        // 会算出比屏幕还宽的固有尺寸，把整个容器撑大，正文随之变宽位移。
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm + 2)
         .background(.ultraThinMaterial)
     }
 
@@ -278,7 +289,10 @@ struct ReaderView: View {
                     .font(.themeTiny)
             }
             .foregroundStyle(chromeTextColor)
-            .frame(minWidth: 52)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            // 用较小下限而非固定 52：由父级分配空间，绝不反过来撑宽父级。
+            .frame(minWidth: 44)
         }
         .buttonStyle(.plain)
     }
@@ -582,7 +596,9 @@ struct ComicPageView: View {
         guard image == nil else { return }
         // 按屏幕宽度做下采样：漫画原图常有 3000px 宽，
         // 全尺寸解码一屏就是几百 MB，滚动几页必被系统杀掉。
-        let maxPixel = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        let screen = UIScreen.main
+        let scale = screen.scale > 0 ? screen.scale : 2
+        let maxPixel = max(screen.bounds.width, screen.bounds.height) * scale
         if !force, let cached = ImageCache.shared.image(for: url + "|" + String(Int(maxPixel))) {
             image = cached
             return
