@@ -19,6 +19,10 @@ final class SearchViewModel: ObservableObject {
     @Published private(set) var results: [SourceResult] = []
     @Published private(set) var isSearching = false
     @Published var scope: Scope = .all
+    /// 本轮因数量上限而没有被搜索的书源数量（界面用来提示用户）
+    @Published private(set) var skippedSourceCount = 0
+    /// 已渲染的书源结果数：结果很多时只渲染前一段
+    @Published private(set) var renderLimit = 40
 
     enum Scope: String, CaseIterable {
         case all = "全部"
@@ -48,6 +52,14 @@ final class SearchViewModel: ObservableObject {
     /// 那些「慢但能用」的源会被这里提前掐断，又变成假的「全部超时」。
     /// 40s 只用来兜住真正卡死的源（脚本死循环、回调挂起）。
     private let perSourceTimeout: TimeInterval = 40
+
+    /// 单次搜索最多使用的书源数量。
+    ///
+    /// 书源上千时，即使并发只有 5 也要排队几十分钟；更糟的是
+    /// 结果占位会一次性生成上千个 SwiftUI 视图，内存直接爆掉。
+    /// 这里取前 N 个，其余在界面上明确提示「已跳过」，
+    /// 用户可在书源管理里禁用不需要的源来聚焦搜索范围。
+    private let maxSourcesPerSearch = 120
 
     /// 整轮搜索的上限：按「源数量 / 并发数 × 单源上限」估算，再留一倍余量。
     private func deadline(for total: Int) -> TimeInterval {
@@ -111,14 +123,22 @@ final class SearchViewModel: ObservableObject {
         let candidates = filtered(sources)
         guard !candidates.isEmpty else {
             results = []
+            skippedSourceCount = 0
             return
         }
+        // 数量闸门：书源上千时按顺序取前 N 个，
+        // 既避免排队几十分钟，也避免一次性生成上千个结果卡片。
+        let selected = candidates.count > maxSourcesPerSearch
+            ? Array(candidates.prefix(maxSourcesPerSearch))
+            : candidates
+        skippedSourceCount = max(0, candidates.count - selected.count)
 
         searchTask?.cancel()
         isSearching = true
 
+        renderLimit = 40
         // 先占位，界面立刻能看到每个源的状态
-        results = candidates.map { source in
+        results = selected.map { source in
             SourceResult(sourceId: source.id, sourceName: source.name, type: source.type,
                          books: [], error: nil, isLoading: true)
         }
@@ -127,7 +147,7 @@ final class SearchViewModel: ObservableObject {
         searchTask = Task { [weak self] in
             guard let self else { return }
             let limit = self.concurrentLimit
-            let total = candidates.count
+            let total = selected.count
             let started = Date()
             let timeLimit = self.deadline(for: total)
             func outOfTime() -> Bool { Date().timeIntervalSince(started) > timeLimit }
@@ -136,7 +156,7 @@ final class SearchViewModel: ObservableObject {
                 // 避免几百个源同时建 JSVirtualMachine 把内存打爆。
                 var next = 0
                 while next < min(limit, total) {
-                    let source = candidates[next]
+                    let source = selected[next]
                     next += 1
                     group.addTask {
                         let outcome = await Self.withTimeout(perSource) {
@@ -157,7 +177,7 @@ final class SearchViewModel: ObservableObject {
                     }
                     self.apply(sourceId: sourceId, outcome: outcome)
                     if next < total, !outOfTime() {
-                        let source = candidates[next]
+                        let source = selected[next]
                         next += 1
                         group.addTask {
                             let outcome = await Self.withTimeout(perSource) {
@@ -199,8 +219,9 @@ final class SearchViewModel: ObservableObject {
         guard let index = results.firstIndex(where: { $0.sourceId == sourceId }) else { return }
         switch outcome {
         case .success(let books):
-            // 过滤空结果条目
-            results[index].books = books.filter { !$0.name.isEmpty }
+            // 过滤空结果并按 id 去重：同一本书重复出现会让 ForEach 崩溃
+            var seen = Set<String>()
+            results[index].books = books.filter { !$0.name.isEmpty && seen.insert($0.id).inserted }
             results[index].isLoading = false
         case .failure(let error):
             results[index].error = SourceError.describe(error)
@@ -223,9 +244,20 @@ final class SearchViewModel: ObservableObject {
         return scoped.filter { seen.insert($0.id).inserted }
     }
 
-    /// 结果按书源分组展示
+    /// 结果按书源分组展示（分页渲染，避免一次构建上千个卡片）
     var groupedResults: [SourceResult] {
-        results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }
+        let visible = results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }
+        return visible.count > renderLimit ? Array(visible.prefix(renderLimit)) : visible
+    }
+
+    /// 当前筛选下可见的结果总数（用于「加载更多」文案）
+    var visibleResultCount: Int {
+        results.filter { !$0.books.isEmpty || $0.error != nil || $0.isLoading }.count
+    }
+
+    /// 追加渲染更多结果卡片
+    func loadMoreResults() {
+        renderLimit += 40
     }
 }
 

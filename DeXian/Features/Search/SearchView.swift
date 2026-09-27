@@ -121,11 +121,36 @@ struct SearchView: View {
     private var resultList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                if viewModel.skippedSourceCount > 0 {
+                    Text("本轮搜索使用前 " + String(viewModel.results.count)
+                         + " 个书源，另有 " + String(viewModel.skippedSourceCount)
+                         + " 个未参与。可在「书源管理」里禁用不需要的源。")
+                        .font(.themeTiny)
+                        .foregroundStyle(Theme.ColorToken.textTertiary)
+                        .padding(.horizontal, Theme.Spacing.page)
+                        .padding(.top, Theme.Spacing.md)
+                }
+
                 ForEach(viewModel.groupedResults) { result in
                     VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                         sourceHeader(result)
                         bookCard(result)
                     }
+                }
+
+                // 结果卡片分页渲染：书源多时不会一次构建上千个视图
+                if viewModel.visibleResultCount > viewModel.groupedResults.count {
+                    Button {
+                        viewModel.loadMoreResults()
+                    } label: {
+                        Text("加载更多书源结果（还剩 "
+                             + String(viewModel.visibleResultCount - viewModel.groupedResults.count) + " 个）")
+                            .font(.themeCallout)
+                            .foregroundStyle(Theme.Palette.brand)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, Theme.Spacing.md)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.bottom, Theme.Spacing.xxl)
