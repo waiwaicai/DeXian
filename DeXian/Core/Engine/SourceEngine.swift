@@ -220,6 +220,8 @@ final class SourceEngine {
         js.host.baseUrl = parsed.url
 
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
+        // 正文按段落取值：块级标签与 <br> 产生换行，阅读时排版才正常
+        contentAnalyzer.paragraphs = true
         var text = contentAnalyzer.string(source.contentRule.content)
 
         // 图片链接（漫画 / 插图）
@@ -236,6 +238,7 @@ final class SourceEngine {
             let nextURL = RuleUtil.absoluteURL(analyzer.interpolate(nextURLString), base: parsed.url)
             guard let nextContent = try? await fetchContent(urlString: nextURL, options: HTTPRequestOptions(), page: pageCount + 1, keyword: "") else { break }
             let nextAnalyzer = makeAnalyzer(content: nextContent, baseUrl: nextURL, js: js)
+            nextAnalyzer.paragraphs = true
             let nextText = nextAnalyzer.string(source.contentRule.content)
             if nextText.isEmpty { break }
             text += "\n" + nextText
@@ -389,13 +392,27 @@ final class SourceEngine {
         analyzer.key = keyword
         target = analyzer.interpolate(target)
 
-        let response = try await HTTPClient.shared.request(
-            urlString: target,
-            options: options,
-            sourceKey: source.cookieJar ? source.id : nil,
-            defaultHeaders: headers,
-            base: baseForResolving(target, fallback: source.url)
-        )
+        // 正文页往往比列表页慢（站点要做权限/解锁处理），
+        // 15 秒的搜索时限太紧，这里放宽到 30 秒并在超时后重试一次。
+        options.timeout = max(options.timeout, 30)
+        var response: HTTPResponse
+        do {
+            response = try await HTTPClient.shared.request(
+                urlString: target,
+                options: options,
+                sourceKey: source.cookieJar ? source.id : nil,
+                defaultHeaders: headers,
+                base: baseForResolving(target, fallback: source.url)
+            )
+        } catch let error as URLError where error.code == .timedOut {
+            response = try await HTTPClient.shared.request(
+                urlString: target,
+                options: options,
+                sourceKey: source.cookieJar ? source.id : nil,
+                defaultHeaders: headers,
+                base: baseForResolving(target, fallback: source.url)
+            )
+        }
 
         // 登录检查
         if let check = source.loginCheckJs.nilIfBlank {
@@ -488,6 +505,26 @@ final class SourceEngine {
                 bookInfo: bookInfo,
                 chapterInfo: chapterInfo
             ).stringList(rule)
+        }
+
+        // 书源可用 java.startBrowserAwait 弹出验证窗口：
+        // 这里提供「在后台线程阻塞等待、界面在主线程弹出」的桥接。
+        js.awaitUserAction = { [weak js] url, title in
+            let key = js?.host.sourceKey ?? ""
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = ValueBox<String>("")
+            DispatchQueue.main.async {
+                WebAuthPresenter.shared.present(url: url, title: title, sourceKey: key) { cookie in
+                    box.set(cookie)
+                    semaphore.signal()
+                }
+            }
+            // 超时上限：用户长时间不操作时不要让脚本永久挂起
+            if semaphore.wait(timeout: .now() + 600) == .timedOut {
+                DispatchQueue.main.async { WebAuthPresenter.shared.cancel() }
+                return ""
+            }
+            return box.current
         }
 
         if !source.jsLib.isEmpty {
