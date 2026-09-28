@@ -913,8 +913,10 @@ final class RuleEngineTests: XCTestCase {
         payload["list"] = nodes
         XCTAssertNotNil(RuleUtil.asString(payload), "字典里的节点也要能文本化")
 
-        // 顶层就是 HTMLNode 时走的是最早的那条分支，同样要保住内容。
-        XCTAssertEqual(RuleUtil.asString(nodes.first), "斗破苍穹")
+        // 顶层就是 HTMLNode 时走的是最早的那条分支：返回该节点的全文（含子节点文字），不能崩也不能丢内容。
+        let nodeText = RuleUtil.asString(nodes.first)
+        XCTAssertTrue(nodeText?.contains("斗破苍穹") ?? false)
+        XCTAssertTrue(nodeText?.contains("天蚕土豆") ?? false)
     }
 
     /// jsSafeValue 的契约：认识的值原样保留，不认识的一律文本化。
