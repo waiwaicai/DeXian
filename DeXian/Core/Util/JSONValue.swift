@@ -28,13 +28,17 @@ func asString(_ any: Any?) -> String? {
     case let value as Double:
         return value == value.rounded() && abs(value) < 1e15 ? String(Int64(value)) : String(value)
     case let value as [Any]:
-        if let data = try? JSONSerialization.data(withJSONObject: value),
+        // 先净化：容器里可能混着 HTMLNode 这类纯 Swift 值，
+        // 直接交给 JSONSerialization 会抛 ObjC 异常，try? 抓不住，进程直接终止。
+        guard let safe = RuleUtil.jsonSafeObject(value) else { return nil }
+        if let data = try? JSONSerialization.data(withJSONObject: safe),
            let text = String(data: data, encoding: .utf8) {
             return text
         }
         return nil
     case let value as [String: Any]:
-        if let data = try? JSONSerialization.data(withJSONObject: value),
+        guard let safe = RuleUtil.jsonSafeObject(value) else { return nil }
+        if let data = try? JSONSerialization.data(withJSONObject: safe),
            let text = String(data: data, encoding: .utf8) {
             return text
         }

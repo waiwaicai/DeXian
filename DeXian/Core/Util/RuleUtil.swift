@@ -6,6 +6,46 @@ enum RuleUtil {
 
     // MARK: 类型
 
+    /// 把任意容器净化为 JSONSerialization 一定能编码的形态。
+    ///
+    /// `isValidJSONObject` 只检查**顶层**类型：`[HTMLNode]` 会被判成合法，
+    /// 紧接着 `JSONSerialization.data(withJSONObject:)` 在递归时遇到纯 Swift
+    /// 对象就抛 `NSInvalidArgumentException`（Invalid type in JSON write）。
+    /// 那是 ObjC 异常，Swift 的 `try?` 抓不住 —— 进程当场终止。
+    /// 书源规则链里 `<js>` 段的前一步结果常常就是节点容器，
+    /// 这条路径在搜索时会被反复走到。
+    ///
+    /// 返回 nil 表示「无法安全编码」，调用方应改用逐条文本化。
+    static func jsonSafeObject(_ value: Any?) -> Any? {
+        guard let value else { return nil }
+        if value is NSNull { return NSNull() }
+        if let text = value as? String { return text }
+        if let number = value as? NSNumber { return number }
+        if let bool = value as? Bool { return bool }
+        if let number = value as? Int { return number }
+        if let number = value as? Int64 { return number }
+        if let number = value as? Double { return number }
+        if let node = value as? HTMLNode { return XPathEngine.stringValue(of: node) }
+        if let array = value as? [Any] {
+            var output: [Any] = []
+            output.reserveCapacity(array.count)
+            for item in array {
+                // 嵌套里只要有一个编不了的，整份就编不了，交给调用方回落。
+                guard let safe = jsonSafeObject(item) else { return nil }
+                output.append(safe)
+            }
+            return output
+        }
+        if let dictionary = value as? [String: Any] {
+            var output: [String: Any] = [:]
+            for (key, item) in dictionary {
+                guard let safe = jsonSafeObject(item) else { return nil }
+                output[key] = safe
+            }
+            return output
+        }
+        return nil
+    }
     static func asString(_ value: Any?) -> String? {
         guard let value else { return nil }
         if value is NSNull { return nil }
@@ -23,16 +63,15 @@ enum RuleUtil {
             return number == number.rounded() && abs(number) < 1e15 ? String(Int64(number)) : String(number)
         }
         if let number = value as? Int { return String(number) }
-        if JSONSerialization.isValidJSONObject(value),
-           let data = try? JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes]),
+        // 先净化再编码：容器里可能混着 HTMLNode，直接交给 JSONSerialization
+        // 会抛 ObjC 异常（try? 抓不住，进程直接终止）。
+        if let safe = jsonSafeObject(value), JSONSerialization.isValidJSONObject(safe),
+           let data = try? JSONSerialization.data(withJSONObject: safe, options: [.withoutEscapingSlashes]),
            let text = String(data: data, encoding: .utf8) {
             return text
         }
         if let array = value as? [Any] {
-            if let data = try? JSONSerialization.data(withJSONObject: array, options: [.withoutEscapingSlashes]),
-               let text = String(data: data, encoding: .utf8) {
-                return text
-            }
+            // 逐条文本化：任何元素都不会被丢下，也不会触发 JSON 异常。
             return array.map { asString($0) ?? "" }.joined(separator: "\n")
         }
         return String(describing: value)
