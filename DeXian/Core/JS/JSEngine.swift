@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import JavaScriptCore
 import CryptoKit
 
@@ -123,7 +124,10 @@ final class JSEngine {
             context.setObject(src, forKeyedSubscript: "src" as NSString)
             context.setObject(host.title, forKeyedSubscript: "title" as NSString)
             if let result {
-                context.setObject(result, forKeyedSubscript: "result" as NSString)
+                // result 可能是 HTMLNode（pure Swift class）或含它的容器：
+                // 直接交给 JavaScriptCore 会在 ObjC 桥接层反射它的内存布局，
+                // 触发 Swift 运行时陷阱（SIGABRT）。必须先净化为 JSC 认识的形态。
+                context.setObject(JSEngine.jsSafeValue(result), forKeyedSubscript: "result" as NSString)
             }
 
             let value = context.evaluateScript(script)
@@ -777,7 +781,14 @@ final class JSEngine {
                 // 既保住了内容，也不会触发未定义行为。
                 return limited.map { String(describing: $0) }
             }
-            return limited.map { swiftValue(JSValue(object: $0, in: context), depth: depth + 1) }
+            return limited.map { element -> Any? in
+                // 只桥接真正的 Objective-C 对象：toArray() 正常都给 NSObject，
+                // 但一旦混进纯 Swift 值，JSValue(object:) 会走未定义行为。
+                guard let object = element as? NSObject else {
+                    return RuleUtil.asString(element) ?? ""
+                }
+                return swiftValue(JSValue(object: object, in: context), depth: depth + 1)
+            }
         }
         if value.isObject {
             if let object = value.toObject(), JSONSerialization.isValidJSONObject(object) { return object }
@@ -785,6 +796,70 @@ final class JSEngine {
             return text.jsonObject ?? text
         }
         return value.toString()
+    }
+
+    // MARK: - 注入前净化
+
+    /// 把一个 Swift 值净化为「JavaScriptCore 一定认识」的形态。
+    ///
+    /// `JSContext.setObject(_:forKeyedSubscript:)` 只接受 Objective-C 可桥接的值
+    /// （NSString / NSNumber / NSArray / NSDictionary / NSNull / block / JSValue）。
+    /// 一旦传进去一个纯 Swift 类型（本项目的 `HTMLNode` 就是 pure Swift `final class`，
+    /// 不继承 NSObject、没有 ObjC 元数据），JavaScriptCore 的桥接层会去反射它的
+    /// 内存布局：先退化成 CoreFoundation 的对象描述，再在 Swift 运行时里读
+    /// `UnsafeBufferPointer.baseAddress` —— 这一步直接触发 Swift 运行时陷阱
+    /// （SIGABRT），崩在 JavaScriptCore 自己的线程里，现场只剩
+    /// `JavaScriptCore → CoreFoundation → libswiftCore → abort` 一串看不懂的帧。
+    ///
+    /// 这不是理论问题：书源规则链里 `<js>…</js>` 的前一步结果经常就是 HTMLNode。
+    /// 搜索时 `listItems` 把列表条目（HTMLNode）作为上下文交给规则，
+    /// 于是任何 `@js:` 或 `{{插值}}` 都会把 HTMLNode 写进 `js.result`，
+    /// 再由这里注入 JS 全局 —— 多源搜索会成百上千次走到这条路径，
+    /// 这正是「搜到某个数量就闪退」而崩溃栈全是 JavaScriptCore 帧的根因。
+    ///
+    /// 这里在最外层出口统一净化一次：认识的类型原样保留，
+    /// 不认识的降级成字符串（复用 RuleUtil 已有的文本化逻辑），
+    /// 并且递归清洗容器，保证没有任何非桥接值漏进 JavaScriptCore。
+    static func jsSafeValue(_ value: Any?) -> Any {
+        jsSafeValue(value, depth: 0)
+    }
+
+    private static func jsSafeValue(_ value: Any?, depth: Int) -> Any {
+        guard let value else { return NSNull() }
+        // 深度上限：HTMLNode 互相引用，容器也可能自引用，无上限展开会栈溢出。
+        if depth >= maxBridgeDepth { return RuleUtil.asString(value) ?? "" }
+
+        if let text = value as? String { return text }
+        // 纯 Swift 类型在这里被拦下，绝不进入 JavaScriptCore 的桥接层。
+        if let node = value as? HTMLNode { return XPathEngine.stringValue(of: node) }
+        // 数字要区分「布尔」与「数值」：Swift 里 NSNumber(1) as? Bool 也会成功，
+        // 直接用 `as? Bool` 会把 JSON 里的数字 1 变成 true，脚本语义就错了。
+        // 只有 CFBoolean 类型的 NSNumber 才是真正的布尔。
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+            return number
+        }
+        if let flag = value as? Bool { return flag }
+        if let number = value as? Int { return number }
+        if let number = value as? Int64 { return number }
+        if let number = value as? Double { return number }
+        if let number = value as? Float { return number }
+
+        if let dictionary = value as? [String: Any] {
+            var output: [String: Any] = [:]
+            for (key, item) in dictionary {
+                if output.count >= maxBridgeCount { break }
+                output[key] = jsSafeValue(item, depth: depth + 1)
+            }
+            return output
+        }
+        if let array = value as? [Any] {
+            let limited = array.count > maxBridgeCount ? Array(array.prefix(maxBridgeCount)) : array
+            return limited.map { jsSafeValue($0, depth: depth + 1) }
+        }
+
+        // 兜底：文本化。宁可让脚本少看到一个字段，也不能让进程崩在桥接层。
+        return RuleUtil.asString(value) ?? ""
     }
 }
 
