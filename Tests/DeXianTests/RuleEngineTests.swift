@@ -849,6 +849,87 @@ final class RuleEngineTests: XCTestCase {
             type: .audio, tocUrl: nil, bookUrl: "https://a.com/audio/1"))
     }
 
+    // MARK: 崩溃回归：JS 注入净化
+    //
+    // 症状：600 多个书源，搜到 97 个左右必闪退；崩溃栈是
+    //   DeXian → JavaScriptCore → CoreFoundation → libswiftCore(baseAddress) → abort
+    // 加上「SIGABRT：Swift 运行时陷阱」。
+    //
+    // 根因：规则链里 <js>…</js> 的前一步结果常常是 HTMLNode，
+    // 而 HTMLNode 是纯 Swift final class（不继承 NSObject、没有 ObjC 元数据）。
+    // 它经 AnalyzeRule → JSEngine.setObject(result) 被写进 JS 全局变量，
+    // JavaScriptCore 的桥接层会去反射它的内存布局并在 Swift 运行时里
+    // 读 UnsafeBufferPointer.baseAddress —— 直接触发 Swift 运行时陷阱。
+    // 每一轮多源搜索会走成百上千次这条路径。
+
+    /// HTMLNode 直接注入 JS 会在 JavaScriptCore 桥接层触发运行时陷阱。
+    /// 净化后必须转成字符串，且求值本身不能崩。
+    func testInjectingHTMLNodeIntoJSDoesNotCrash() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let node = CSSSelector.select("div.item", in: document()).first ?? document()
+
+        engine.result = node
+        // 只要这里没崩，说明没把纯 Swift 对象交给 JavaScriptCore。
+        let text = engine.evaluateString("typeof result")
+        XCTAssertEqual(text, "string", "HTMLNode 必须先降级成字符串再注入 JS")
+    }
+
+    /// 含 HTMLNode 的容器同样要走净化路径（数组 / 字典 / 嵌套）。
+    func testInjectingContainersWithHTMLNodeDoesNotCrash() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let nodes = CSSSelector.select("div.item", in: document())
+        XCTAssertFalse(nodes.isEmpty)
+
+        engine.result = nodes
+        XCTAssertEqual(engine.evaluateString("Array.isArray(result)"), "true")
+        XCTAssertEqual(engine.evaluateString("typeof result[0]"), "string")
+
+        // 显式构造 [String: Any]，避免依赖 Swift 集合向上转型的细节
+        var payload: [String: Any] = [:]
+        payload["node"] = nodes.first as Any
+        payload["list"] = nodes
+        engine.result = payload
+        XCTAssertEqual(engine.evaluateString("typeof result"), "object")
+        XCTAssertEqual(engine.evaluateString("typeof result.node"), "string")
+        XCTAssertEqual(engine.evaluateString("typeof result.list[0]"), "string")
+    }
+
+    /// jsSafeValue 的契约：认识的值原样保留，不认识的一律文本化。
+    func testJSSafeValueSanitizesNonBridgeableValues() {
+        XCTAssertEqual(JSEngine.jsSafeValue("文本") as? String, "文本")
+        XCTAssertEqual(JSEngine.jsSafeValue(7) as? Int, 7)
+        let dict = JSEngine.jsSafeValue(["a": 1]) as? [String: Any]
+        XCTAssertEqual(dict?["a"] as? Int, 1)
+        XCTAssertTrue(JSEngine.jsSafeValue(nil) is NSNull)
+
+        let node = CSSSelector.select("div.item", in: document()).first ?? document()
+        XCTAssertTrue(JSEngine.jsSafeValue(node) is String, "纯 Swift 类型必须被文本化")
+        var payload: [String: Any] = [:]
+        payload["list"] = [node]
+        payload["node"] = node
+        let nested = JSEngine.jsSafeValue(payload) as? [String: Any]
+        XCTAssertTrue((nested?["list"] as? [Any])?.first is String, "嵌套数组也要净化")
+        XCTAssertTrue(nested?["node"] is String, "嵌套对象字段也要净化")
+    }
+
+    /// 超深嵌套不能让净化逻辑无限递归（HTML 容器结构可以很深）。
+    func testJSSafeValueHandlesDeepNesting() {
+        let node = CSSSelector.select("div.item", in: document()).first ?? document()
+        var nested: Any = node
+        for _ in 0..<200 { nested = [nested] }
+        // 不应崩、不应无限递归。
+        let output = JSEngine.jsSafeValue(nested)
+        XCTAssertNotNil(output)
+    }
+
+    /// 端到端：搜索链路里 <js> 段拿到 HTMLNode 作为 result 时不能崩。
+    func testJSResultInjectionThroughRuleChainDoesNotCrash() {
+        let node = CSSSelector.select("div.item", in: document()).first ?? document()
+        let engine = JSEngine(host: JSEngine.Host())
+        engine.result = node
+        XCTAssertEqual(engine.evaluateString("typeof result"), "string")
+        XCTAssertEqual(engine.evaluateString("result.length > 0"), "true")
+    }
 }
 // MARK: - 订阅源（RSS）
 
@@ -1471,87 +1552,6 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("java.base64Decode('aGk=')"), "hi")
         XCTAssertEqual(engine.evaluateString("(function(){ var c = cache; return typeof c.put; })()"), "function")
         XCTAssertEqual(engine.evaluateString("typeof source.getKey"), "function")
-    }
-
-    // MARK: 崩溃回归：JS 注入净化
-    //
-    // 症状：600 多个书源，搜到 97 个左右必闪退；崩溃栈是
-    //   DeXian → JavaScriptCore → CoreFoundation → libswiftCore(baseAddress) → abort
-    // 加上「SIGABRT：Swift 运行时陷阱」。
-    //
-    // 根因：规则链里 <js>…</js> 的前一步结果常常是 HTMLNode，
-    // 而 HTMLNode 是纯 Swift final class（不继承 NSObject、没有 ObjC 元数据）。
-    // 它经 AnalyzeRule → JSEngine.setObject(result) 被写进 JS 全局变量，
-    // JavaScriptCore 的桥接层会去反射它的内存布局并在 Swift 运行时里
-    // 读 UnsafeBufferPointer.baseAddress —— 直接触发 Swift 运行时陷阱。
-    // 每一轮多源搜索会走成百上千次这条路径。
-
-    /// HTMLNode 直接注入 JS 会在 JavaScriptCore 桥接层触发运行时陷阱。
-    /// 净化后必须转成字符串，且求值本身不能崩。
-    func testInjectingHTMLNodeIntoJSDoesNotCrash() {
-        let engine = JSEngine(host: JSEngine.Host())
-        let node = CSSSelector.select("div.item", in: document()).first ?? document()
-
-        engine.result = node
-        // 只要这里没崩，说明没把纯 Swift 对象交给 JavaScriptCore。
-        let text = engine.evaluateString("typeof result")
-        XCTAssertEqual(text, "string", "HTMLNode 必须先降级成字符串再注入 JS")
-    }
-
-    /// 含 HTMLNode 的容器同样要走净化路径（数组 / 字典 / 嵌套）。
-    func testInjectingContainersWithHTMLNodeDoesNotCrash() {
-        let engine = JSEngine(host: JSEngine.Host())
-        let nodes = CSSSelector.select("div.item", in: document())
-        XCTAssertFalse(nodes.isEmpty)
-
-        engine.result = nodes
-        XCTAssertEqual(engine.evaluateString("Array.isArray(result)"), "true")
-        XCTAssertEqual(engine.evaluateString("typeof result[0]"), "string")
-
-        // 显式构造 [String: Any]，避免依赖 Swift 集合向上转型的细节
-        var payload: [String: Any] = [:]
-        payload["node"] = nodes.first as Any
-        payload["list"] = nodes
-        engine.result = payload
-        XCTAssertEqual(engine.evaluateString("typeof result"), "object")
-        XCTAssertEqual(engine.evaluateString("typeof result.node"), "string")
-        XCTAssertEqual(engine.evaluateString("typeof result.list[0]"), "string")
-    }
-
-    /// jsSafeValue 的契约：认识的值原样保留，不认识的一律文本化。
-    func testJSSafeValueSanitizesNonBridgeableValues() {
-        XCTAssertEqual(JSEngine.jsSafeValue("文本") as? String, "文本")
-        XCTAssertEqual(JSEngine.jsSafeValue(7) as? Int, 7)
-        XCTAssertEqual(JSEngine.jsSafeValue(["a": 1]) as? [String: Int], ["a": 1])
-        XCTAssertTrue(JSEngine.jsSafeValue(nil) is NSNull)
-
-        let node = CSSSelector.select("div.item", in: document()).first ?? document()
-        XCTAssertTrue(JSEngine.jsSafeValue(node) is String, "纯 Swift 类型必须被文本化")
-        var payload: [String: Any] = [:]
-        payload["list"] = [node]
-        payload["node"] = node
-        let nested = JSEngine.jsSafeValue(payload) as? [String: Any]
-        XCTAssertTrue((nested?["list"] as? [Any])?.first is String, "嵌套数组也要净化")
-        XCTAssertTrue(nested?["node"] is String, "嵌套对象字段也要净化")
-    }
-
-    /// 超深嵌套不能让净化逻辑无限递归（HTML 容器结构可以很深）。
-    func testJSSafeValueHandlesDeepNesting() {
-        let node = CSSSelector.select("div.item", in: document()).first ?? document()
-        var nested: Any = node
-        for _ in 0..<200 { nested = [nested] }
-        // 不应崩、不应无限递归。
-        let output = JSEngine.jsSafeValue(nested)
-        XCTAssertNotNil(output)
-    }
-
-    /// 端到端：搜索链路里 <js> 段拿到 HTMLNode 作为 result 时不能崩。
-    func testJSResultInjectionThroughRuleChainDoesNotCrash() {
-        let node = CSSSelector.select("div.item", in: document()).first ?? document()
-        let engine = JSEngine(host: JSEngine.Host())
-        engine.result = node
-        XCTAssertEqual(engine.evaluateString("typeof result"), "string")
-        XCTAssertEqual(engine.evaluateString("result.length > 0"), "true")
     }
 
 }
