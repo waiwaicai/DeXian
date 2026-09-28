@@ -894,6 +894,29 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("typeof result.list[0]"), "string")
     }
 
+    /// asString 碰到「容器里混着 HTMLNode」时不能抛出 ObjC 异常。
+    ///
+    /// `isValidJSONObject` 只检查顶层：`[HTMLNode]` 会被判成合法，
+    /// 随后 `JSONSerialization.data` 递归到纯 Swift 对象就抛
+    /// `NSInvalidArgumentException` —— Swift 的 try? 抓不住，进程直接终止。
+    /// 这条路径与 setObject(result) 一样，搜索时会被反复走到。
+    func testAsStringHandlesContainersWithHTMLNode() {
+        let nodes = CSSSelector.select("div.item", in: document())
+        XCTAssertFalse(nodes.isEmpty)
+
+        let arrayText = RuleUtil.asString(nodes)
+        XCTAssertNotNil(arrayText)
+        XCTAssertTrue(arrayText?.contains("斗破苍穹") ?? false, "数组元素不能被丢掉")
+
+        var payload: [String: Any] = [:]
+        payload["node"] = nodes.first as Any
+        payload["list"] = nodes
+        XCTAssertNotNil(RuleUtil.asString(payload), "字典里的节点也要能文本化")
+
+        // 顶层就是 HTMLNode 时走的是最早的那条分支，同样要保住内容。
+        XCTAssertEqual(RuleUtil.asString(nodes.first), "斗破苍穹")
+    }
+
     /// jsSafeValue 的契约：认识的值原样保留，不认识的一律文本化。
     func testJSSafeValueSanitizesNonBridgeableValues() {
         XCTAssertEqual(JSEngine.jsSafeValue("文本") as? String, "文本")
