@@ -123,6 +123,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      # 崩溃报告里的 "DeXian + 492928" 只有配上 dSYM 才能反解成函数名。
+      # 没有 dSYM 时，排查闪退只能靠推断；有 dSYM 就能直接定位到行。
+      - name: 上传 dSYM（符号表）
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeXian-dSYM
+          path: build/DeXian.xcarchive/dSYMs/
+          if-no-files-found: ignore
+          retention-days: 30
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
