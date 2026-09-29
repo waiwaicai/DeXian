@@ -862,16 +862,22 @@ final class RuleEngineTests: XCTestCase {
     // 读 UnsafeBufferPointer.baseAddress —— 直接触发 Swift 运行时陷阱。
     // 每一轮多源搜索会走成百上千次这条路径。
 
-    /// HTMLNode 直接注入 JS 会在 JavaScriptCore 桥接层触发运行时陷阱。
-    /// 净化后必须转成字符串，且求值本身不能崩。
+    /// 注入前必须包成元素对象，且求值本身不能崩。
+    ///
+    /// 为什么不能降级成字符串：列表规则里的 `result` 就是 jsoup 元素，
+    /// 书源写 `result.toArray()` / `result.select(...)`（实测 32 处）。
+    /// 文本化之后这些调用全是 undefined is not a function，
+    /// 目录与搜索列表会直接空掉。
     func testInjectingHTMLNodeIntoJSDoesNotCrash() {
         let engine = JSEngine(host: JSEngine.Host())
         let node = CSSSelector.select("div.item", in: document()).first ?? document()
 
         engine.result = node
         // 只要这里没崩，说明没把纯 Swift 对象交给 JavaScriptCore。
-        let text = engine.evaluateString("typeof result")
-        XCTAssertEqual(text, "string", "HTMLNode 必须先降级成字符串再注入 JS")
+        XCTAssertEqual(engine.evaluateString("typeof result"), "object")
+        XCTAssertEqual(engine.evaluateString("typeof result.select"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof result.attr"), "function")
+        XCTAssertEqual(engine.evaluateString("result.text().length > 0"), "true")
     }
 
     /// 含 HTMLNode 的容器同样要走净化路径（数组 / 字典 / 嵌套）。
@@ -881,8 +887,10 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertFalse(nodes.isEmpty)
 
         engine.result = nodes
-        XCTAssertEqual(engine.evaluateString("Array.isArray(result)"), "true")
-        XCTAssertEqual(engine.evaluateString("typeof result[0]"), "string")
+        XCTAssertEqual(engine.evaluateString("result.size() > 0"), "true")
+        XCTAssertEqual(engine.evaluateString("typeof result.toArray"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof result[0]"), "object")
+        XCTAssertEqual(engine.evaluateString("typeof result[0].attr"), "function")
 
         // 显式构造 [String: Any]，避免依赖 Swift 集合向上转型的细节
         var payload: [String: Any] = [:]
@@ -952,8 +960,10 @@ final class RuleEngineTests: XCTestCase {
         let node = CSSSelector.select("div.item", in: document()).first ?? document()
         let engine = JSEngine(host: JSEngine.Host())
         engine.result = node
-        XCTAssertEqual(engine.evaluateString("typeof result"), "string")
-        XCTAssertEqual(engine.evaluateString("result.length > 0"), "true")
+        XCTAssertEqual(engine.evaluateString("typeof result"), "object")
+        XCTAssertEqual(engine.evaluateString("result.text().length > 0"), "true")
+        // 目录里最常见的写法：元素上继续 select 再取属性
+        XCTAssertEqual(engine.evaluateString("result.select('a').first().attr('href')"), "/book/1")
     }
 }
 // MARK: - 订阅源（RSS）
@@ -1662,7 +1672,7 @@ final class RssTests: XCTestCase {
         let analyzer = AnalyzeRule(context: context)
 
         XCTAssertEqual(analyzer.string("@get:{n}"), "斗破苍穹")
-        XCTAssertEqual(analyzer.string("{{bookName}}"), "斗破苍穹")
+        XCTAssertEqual(analyzer.string("{{n}}"), "斗破苍穹")
         // 模板与选择器并存时仍然按选择器求值，不能被拍成文本
         XCTAssertTrue(analyzer.string("class.none@text").isEmpty)
     }
@@ -1719,6 +1729,35 @@ final class RssTests: XCTestCase {
     func testTopLevelReturnScriptStillReturns() {
         let engine = JSEngine(host: JSEngine.Host())
         XCTAssertEqual(engine.evaluateString("var a = 1; return a + 1;"), "2")
+    }
+
+    /// 包装形态的选择必须靠**结构判定**，不能靠异常文案。
+    ///
+    /// JavaScriptCore 对顶层 return 的报错原文（"Return statements are only
+    /// valid inside functions."）与 V8 / Rhino 都不一致；一旦靠文案兜底，
+    /// 文案对不上就会静默返回空串。这里把判定锁死在语法结构上。
+    func testScriptWrapperPicksFunctionFormForTopLevelReturn() {
+        // 顶层 return：函数形态必须排在首位（块形态是语法错误）
+        XCTAssertTrue(JSEngine.hasTopLevelReturn("var a = 1; return a + 1;"))
+        XCTAssertTrue(JSEngine.hasTopLevelReturn("if (a) return 1;"))
+        XCTAssertTrue(JSEngine.scriptCandidates("return 1")[0].hasPrefix("(function(){"))
+
+        // 函数体内的 return 不算顶层
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("function f(){ return 1 }"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("if (a) { return 1 }"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("var f = function(){ return 1 }; f();"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("(function(){ return 1 })()"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("try { return 1 } finally { }"))
+
+        // 字符串 / 注释 / 正则里的 return 不是关键字
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("var s = 'return 1';"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("// return 1"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("/* return 1 */ 2"))
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("var r = /return/;"))
+
+        // 普通脚本仍用块形态先行：块隔离顶层 let，避免重复求值冲突
+        XCTAssertFalse(JSEngine.hasTopLevelReturn("let txt = 'a'; txt"))
+        XCTAssertTrue(JSEngine.scriptCandidates("let txt = 'a'; txt")[0].hasPrefix("{"))
     }
 
     // MARK: JS 环境补齐

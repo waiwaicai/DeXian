@@ -174,6 +174,12 @@ final class JSEngine {
                 // 再跑一次会把请求翻倍，必须直接放弃。
                 let isSyntaxError = lastMessage.contains("SyntaxError")
                     || lastMessage.contains("Illegal return")
+                    // JavaScriptCore 对顶层 return 的报错原文是
+                    // "Return statements are only valid inside functions."，
+                    // 既不含 "SyntaxError" 也不含 "Illegal return"。
+                    // 只匹配前两种写法时，这条判定会失败并直接放弃，
+                    // 于是「顶层 return」的脚本永远拿到空串。
+                    || lastMessage.contains("Return statements are only valid inside functions")
                 if isSyntaxError, index + 1 < candidates.count { continue }
                 break
             }
@@ -216,11 +222,100 @@ final class JSEngine {
     static func scriptCandidates(_ script: String) -> [String] {
         let body = script.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return [script] }
-        var candidates = ["{\n" + script + "\n}"]
-        if body.contains("return") {
-            candidates.append("(function(){\n" + script + "\n})()")
+        let block = "{\n" + script + "\n}"
+        let wrapped = "(function(){\n" + script + "\n})()"
+        // 顶层 return 的脚本在块形态下是**语法错误**，函数形态才是唯一解，
+        // 因此放到首位，省掉一次注定失败的求值。
+        if hasTopLevelReturn(script) { return [wrapped, block] }
+        return [block, wrapped]
+    }
+
+    /// 脚本里是否存在「函数体之外」的 return。
+    ///
+    /// 书源脚本在 Legado 里是按**函数体**求值的（Rhino 允许顶层 return），
+    /// 而这里为了隔离顶层 `let` 声明会包一层块 —— 块里出现顶层 return
+    /// 直接是语法错误。两种形态的容忍度不同，所以必须先把这类脚本挑出来。
+    ///
+    /// 不要改成「捕获异常后看错误文案」来兜底：JavaScriptCore 的报错原文
+    /// 与 V8 / Rhino 都不一致，文案一旦对不上就会静默退化成空串，
+    /// 表现是「带 return 的书源整条规则失效」。结构判定与文案无关。
+    ///
+    /// 扫描时跳过字符串 / 模板串 / 注释 / 正则字面量，只认大括号深度为 0
+    /// 处的 `return` 关键字（`function` 体内的 return 深度必然大于 0）。
+    static func hasTopLevelReturn(_ script: String) -> Bool {
+        let characters = Array(script)
+        var index = 0
+        var depth = 0
+        // 上一个有效字符：用于判断 `/` 是除号还是正则字面量的起始。
+        var previous: Character = "\n"
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if character == "\"" || character == "'" || character == "`" {
+                let quote = character
+                index += 1
+                while index < characters.count, characters[index] != quote {
+                    if characters[index] == "\\" { index += 1 }
+                    index += 1
+                }
+                index += 1
+                previous = quote
+                continue
+            }
+            if character == "/", index + 1 < characters.count, characters[index + 1] == "/" {
+                while index < characters.count, characters[index] != "\n" { index += 1 }
+                continue
+            }
+            if character == "/", index + 1 < characters.count, characters[index + 1] == "*" {
+                index += 2
+                while index + 1 < characters.count,
+                      !(characters[index] == "*" && characters[index + 1] == "/") { index += 1 }
+                index += 2
+                continue
+            }
+            if character == "/", "=(,:![&|?{};+".contains(previous) || previous == "\n" {
+                // 正则字面量：只在「上一个有效字符不可能结束一个表达式」时成立。
+                var scanning = true
+                var inClass = false
+                index += 1
+                while index < characters.count, scanning {
+                    let next = characters[index]
+                    if next == "\\" { index += 2; continue }
+                    if next == "[" { inClass = true } else if next == "]" { inClass = false }
+                    else if next == "/", !inClass { scanning = false }
+                    else if next == "\n" { scanning = false }
+                    index += 1
+                }
+                previous = "/"
+                continue
+            }
+            if character == "{" { depth += 1; previous = character; index += 1; continue }
+            if character == "}" { depth = max(0, depth - 1); previous = character; index += 1; continue }
+            if character.isWhitespace { index += 1; continue }
+
+            if depth == 0, Self.matchesKeyword(characters, at: index, keyword: "return") {
+                return true
+            }
+            previous = character
+            index += 1
         }
-        return candidates
+        return false
+    }
+
+    /// 从 `index` 起是否正好是独立的关键字（前后都不能是标识符字符）。
+    private static func matchesKeyword(_ characters: [Character], at index: Int, keyword: String) -> Bool {
+        let target = Array(keyword)
+        guard index + target.count <= characters.count else { return false }
+        for offset in 0..<target.count where characters[index + offset] != target[offset] { return false }
+        if index > 0, Self.isIdentifierCharacter(characters[index - 1]) { return false }
+        let after = index + target.count
+        if after < characters.count, Self.isIdentifierCharacter(characters[after]) { return false }
+        return true
+    }
+
+    private static func isIdentifierCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || character == "$"
     }
 
     func evaluateString(_ script: String) -> String {

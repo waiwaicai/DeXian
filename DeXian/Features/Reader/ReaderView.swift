@@ -1060,6 +1060,59 @@ struct ReaderSettingsSheet: View {
             : Color(hex: settings.readerTheme.textColor)
     }
 
+    /// 预览用的示例段落。
+    ///
+    /// 刻意用两段：段落间距是「段与段之间」的距离，
+    /// 只有一段文字时这个设置改了也看不出任何变化。
+    private var previewParagraphs: [String] {
+        [
+            "得闲 · 示例正文 Aa 123",
+            "调整字号、行距、段落间距与字体，这里会同步变化。"
+        ]
+    }
+
+    /// 实时预览卡片。
+    ///
+    /// 排版参数逐项复刻阅读页真实渲染（TextReaderView）：
+    /// 同一 UIFont、同一 lineSpacing、段落间距用 VStack spacing 表达。
+    /// 只有与真机渲染一致，预览才有参考价值 ——
+    /// 之前预览是单行文本、且只放在「字号」分组里，
+    /// 改行距 / 段距 / 字体时它纹丝不动。
+    private var previewCard: some View {
+        VStack(alignment: .leading, spacing: CGFloat(settings.paragraphSpacing)) {
+            ForEach(Array(previewParagraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(settings.textIndent ? "　　" + paragraph : paragraph)
+                    .font(previewFont)
+                    .lineSpacing(settings.lineSpacing)
+                    .foregroundStyle(previewText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
+                .fill(previewBackground)
+        )
+        // 预览是展示用的，不要让它吃手势 / 被选中
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.12), value: settings.fontSize)
+        .animation(.easeOut(duration: 0.12), value: settings.lineSpacing)
+        .animation(.easeOut(duration: 0.12), value: settings.paragraphSpacing)
+    }
+
+    /// 预览字体必须与当前阅读模式的真实渲染字体完全一致。
+    ///
+    /// 滚动模式渲染用 `settings.readingFont`，翻页模式用
+    /// `PageSplitter.uiFont`（保证分页测量与绘制同源）。
+    /// 预览若固定用其中一种，「等宽」这类两种构造方式度量有差异的字体
+    /// 就会看到与正文不一样的行宽和行高。
+    private var previewFont: Font {
+        settings.pageTurn == .scroll
+            ? settings.readingFont
+            : Font(PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize))
+    }
+
     /// 配色选项：左侧圆形色块 + 名称
     private func themeChip(_ item: SettingsStore.ReaderTheme) -> some View {
         let active = !settings.readerFollowsSystem && settings.readerTheme == item
@@ -1102,6 +1155,13 @@ struct ReaderSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                // 预览放在最前面：调下面的滑杆时它一直在视野里，
+                // 改动能立刻看到，不用上下翻。
+                Section("预览") {
+                    previewCard
+                        .padding(.vertical, Theme.Spacing.xs)
+                }
+
                 Section("主题") {
                     // 黑底绿字等组合，点一下立即应用到阅读页
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: Theme.Spacing.sm)],
@@ -1127,30 +1187,24 @@ struct ReaderSettingsSheet: View {
                             .foregroundStyle(Theme.ColorToken.textSecondary)
                             .frame(width: 28, alignment: .trailing)
                     }
-                    // 实时预览：用所选字体与配色显示一行示例
-                    Text("得闲 · 示例正文 Aa 123")
-                        .font(settings.readingFont)
-                        .lineSpacing(settings.lineSpacing)
-                        .foregroundStyle(previewText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Theme.Spacing.md)
-                        .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
-                                .fill(previewBackground)
-                        )
                 }
 
-                Section("行距") {
-                    Slider(value: $settings.lineSpacing, in: 0...24, step: 1)
-                }
-
-                Section("字体") {
+                Section("字体与行距") {
                     Picker("字体", selection: $settings.fontFamily) {
                         ForEach(SettingsStore.fontFamilies, id: \.self) { name in
                             Text(name).tag(name)
                         }
                     }
                     .pickerStyle(.menu)
+
+                    HStack {
+                        Text("行距")
+                        Slider(value: $settings.lineSpacing, in: 0...24, step: 1)
+                        Text(String(Int(settings.lineSpacing)))
+                            .font(.themeCaption)
+                            .foregroundStyle(Theme.ColorToken.textSecondary)
+                            .frame(width: 28, alignment: .trailing)
+                    }
 
                     // 段落间距：长文阅读时拉开段落更省眼
                     HStack {
@@ -1161,6 +1215,8 @@ struct ReaderSettingsSheet: View {
                             .foregroundStyle(Theme.ColorToken.textSecondary)
                             .frame(width: 28, alignment: .trailing)
                     }
+
+                    Toggle("段落缩进", isOn: $settings.textIndent)
                 }
 
                 Section("翻页") {
@@ -1169,7 +1225,6 @@ struct ReaderSettingsSheet: View {
                             Text(turn.displayName).tag(turn)
                         }
                     }
-                    Toggle("段落缩进", isOn: $settings.textIndent)
                     Toggle("显示顶部进度", isOn: $settings.showProgress)
                     Toggle("显示底部翻页条", isOn: $settings.showPageFooter)
                 }
