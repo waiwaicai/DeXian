@@ -123,12 +123,17 @@ final class JSEngine {
             context.setObject(host.baseUrl, forKeyedSubscript: "baseUrl" as NSString)
             context.setObject(src, forKeyedSubscript: "src" as NSString)
             context.setObject(host.title, forKeyedSubscript: "title" as NSString)
-            if let result {
-                // result 可能是 HTMLNode（pure Swift class）或含它的容器：
-                // 直接交给 JavaScriptCore 会在 ObjC 桥接层反射它的内存布局，
-                // 触发 Swift 运行时陷阱（SIGABRT）。必须先净化为 JSC 认识的形态。
-                context.setObject(JSEngine.jsSafeValue(result), forKeyedSubscript: "result" as NSString)
-            }
+            // 无条件注入 result。
+            //
+            // 原实现只在 result != nil 时才定义全局 result，于是「上一段规则没有输出」
+            // 时脚本里会出现 ReferenceError: Can't find variable: result。
+            // 书源大量依赖 result（实测 2100 处），必须保证它始终存在；
+            // 没有值就注入 null，交给脚本自己的判空逻辑处理。
+            //
+            // result 可能是 HTMLNode（pure Swift class）或含它的容器：
+            // 直接交给 JavaScriptCore 会在 ObjC 桥接层反射它的内存布局，
+            // 触发 Swift 运行时陷阱（SIGABRT）。必须先净化为 JSC 认识的形态。
+            context.setObject(JSEngine.jsSafeValue(result), forKeyedSubscript: "result" as NSString)
 
             let value = context.evaluateScript(script)
             if let exception = context.exception {
@@ -173,14 +178,19 @@ final class JSEngine {
         setupBookChapter(context)
         setupCookie(context)
         setupCache(context)
+        // 先补齐 Java 侧扩展 API（CryptoHelper / jsoup / ajaxAll …），
+        // 再注入 JS 兼容层 —— 兼容层里的 Packages、CryptoJS、$
+        // 都要引用 java.* 与 __dx.* 上的方法，顺序不能反。
+        installExtendedJava()
+        JSRuntimeBootstrap.install(into: context)
         _ = context.evaluateScript("var console = { log: function(){ java.log(Array.prototype.join.call(arguments,' ')) } };")
     }
 
     private func setupJava(_ context: JSContext) {
         let java = JSEngine.newObject(in: context)
 
-        let connect: @convention(block) (JSValue) -> JSValue = { [weak self, weak context] urlValue in
-            guard let self else { return JSValue(undefinedIn: context) }
+        let connect: @convention(block) (JSValue) -> JSValue = { [weak self] urlValue in
+            guard let self else { return JSValue() }
             return self.connect(url: JSEngine.stringFrom(urlValue), header: nil, method: nil, body: nil)
         }
         java.setObject(connect, forKeyedSubscript: "connect" as NSString)
@@ -192,14 +202,14 @@ final class JSEngine {
         }
         java.setObject(ajax, forKeyedSubscript: "ajax" as NSString)
 
-        let get: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self, weak context] urlValue, headerValue in
-            guard let self else { return JSValue(undefinedIn: context) }
+        let get: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlValue, headerValue in
+            guard let self else { return JSValue() }
             return self.connect(url: JSEngine.stringFrom(urlValue), header: headerValue, method: "GET", body: nil)
         }
         java.setObject(get, forKeyedSubscript: "get" as NSString)
 
-        let post: @convention(block) (JSValue, JSValue, JSValue) -> JSValue = { [weak self, weak context] urlValue, bodyValue, headerValue in
-            guard let self else { return JSValue(undefinedIn: context) }
+        let post: @convention(block) (JSValue, JSValue, JSValue) -> JSValue = { [weak self] urlValue, bodyValue, headerValue in
+            guard let self else { return JSValue() }
             return self.connect(url: JSEngine.stringFrom(urlValue),
                                 header: headerValue,
                                 method: "POST",
@@ -299,10 +309,14 @@ final class JSEngine {
         }
         java.setObject(getString, forKeyedSubscript: "getString" as NSString)
 
-        let getStringList: @convention(block) (String, JSValue, Bool) -> [String] = { [weak self] rule, content, isURL in
-            guard let self else { return [] }
+        // 返回值必须是「像 java.util.List 的对象」而不是裸 JS 数组：
+        // 书源写 bs.size() / bs.get(i)，裸数组只有 .length 没有 .size()，
+        // 一调用就抛 TypeError（日志里的 "bs.size is not a function"）。
+        let getStringList: @convention(block) (String, JSValue, Bool) -> JSValue = { [weak self] rule, content, isURL in
+            guard let self, let context = self.context else { return JSValue() }
             let target: Any? = (content.isUndefined || content.isNull) ? nil : JSEngine.swiftValue(content)
-            return self.host.resolveStringList?(rule, target, isURL) ?? []
+            let values = self.host.resolveStringList?(rule, target, isURL) ?? []
+            return JSEngine.makeListValue(values, in: context)
         }
         java.setObject(getStringList, forKeyedSubscript: "getStringList" as NSString)
 
@@ -312,18 +326,20 @@ final class JSEngine {
         }
         java.setObject(setContent, forKeyedSubscript: "setContent" as NSString)
 
-        let getElement: @convention(block) (String) -> JSValue = { [weak self, weak context] rule in
-            guard let self, let document = self.currentDocument() else { return JSValue(undefinedIn: context) }
+        let getElement: @convention(block) (String) -> JSValue = { [weak self] rule in
+            guard let self, let document = self.currentDocument() else { return JSValue() }
             guard let first = self.selectNodes(rule, in: document).first else {
-                return JSValue(undefinedIn: context)
+                return JSValue()
             }
             return self.wrapElement(first)
         }
         java.setObject(getElement, forKeyedSubscript: "getElement" as NSString)
 
-        let getElements: @convention(block) (String) -> [JSValue] = { [weak self] rule in
-            guard let self, let document = self.currentDocument() else { return [] }
-            return self.selectNodes(rule, in: document).map { self.wrapElement($0) }
+        // 同样返回 List 语义：书源写 java.getElements(..).size() / .get(i)。
+        let getElements: @convention(block) (String) -> JSValue = { [weak self] rule in
+            guard let self, let context = self.context, let document = self.currentDocument() else { return JSValue() }
+            let nodes = self.selectNodes(rule, in: document)
+            return JSEngine.makeElementListValue(nodes, engine: self, in: context)
         }
         java.setObject(getElements, forKeyedSubscript: "getElements" as NSString)
 
@@ -346,8 +362,9 @@ final class JSEngine {
         }
         java.setObject(timeFormat, forKeyedSubscript: "timeFormat" as NSString)
 
-        let queryTTF: @convention(block) (JSValue) -> JSValue = { [weak context] _ in
-            JSValue(undefinedIn: context)
+        let queryTTF: @convention(block) (JSValue) -> JSValue = { [weak self] _ in
+            guard let context = self?.context else { return JSValue() }
+            return JSValue(nullIn: context) ?? JSValue()
         }
         java.setObject(queryTTF, forKeyedSubscript: "queryTTF" as NSString)
 
@@ -392,27 +409,6 @@ final class JSEngine {
         java.setObject(host.headers, forKeyedSubscript: "headerMap" as NSString)
 
         context.setObject(java, forKeyedSubscript: "java" as NSString)
-        _ = context.evaluateScript("""
-            var Packages = {
-                java: {
-                    security: { MessageDigest: { getInstance: function() { return { digest: function() { return []; }, update: function() {} }; } } },
-                    nio: {}, io: {}
-                },
-                org: {
-                    jsoup: {
-                        Jsoup: {
-                            parse: function(html) { return { select: function() { return []; }, text: function() { return String(html || ""); }, html: function() { return String(html || ""); } }; },
-                            connect: function() { return { get: function() { return null; }, post: function() { return null; } }; }
-                        },
-                        nodes: { Document: {}, Element: {} }
-                    },
-                    javax: { crypto: {} },
-                    lang: { String: String, System: { currentTimeMillis: function() { return Date.now(); }, sleep: function() {} }, Thread: { sleep: function() {} } },
-                    util: { HashMap: function() { return { put: function() {}, get: function() { return null; }, containsKey: function() { return false; } }; }, Arrays: { copyOfRange: function(a, s, e) { return (a || []).slice(s, e); }, copyOf: function(a, n) { return (a || []).slice(0, n); } } }
-                }
-            };
-            var JavaImporter = function(){};
-        """)
     }
 
     private func setupSource(_ context: JSContext) {
@@ -624,7 +620,9 @@ final class JSEngine {
 
     // MARK: 网络响应
 
-    private func connect(url urlString: String, header: JSValue?, method: String?, body: String?) -> JSValue {
+    /// 被 JSEngineRuntime.swift 的 ajaxAll / getStrResponse / head 复用，
+    /// 因此不能是 private（Swift 的 private 是文件级作用域）。
+    func connect(url urlString: String, header: JSValue?, method: String?, body: String?) -> JSValue {
         guard let context else { return JSEngine.undefinedValue }
         guard !urlString.isEmpty else { return JSEngine.undefinedValue }
 
@@ -724,8 +722,13 @@ final class JSEngine {
 
     // MARK: 元素包装
 
-    private func wrapElement(_ node: HTMLNode) -> JSValue {
+    /// jsoup 桩（JSEngineRuntime.swift）也要用，不能是 private。
+    func wrapElement(_ node: HTMLNode) -> JSValue {
         guard let context else { return JSEngine.undefinedValue }
+        return wrapElement(node, in: context)
+    }
+
+    func wrapElement(_ node: HTMLNode, in context: JSContext) -> JSValue {
         let object = JSEngine.newObject(in: context)
 
         let text: @convention(block) () -> String = { node.normalizedText }
@@ -749,15 +752,16 @@ final class JSEngine {
         let tagName: @convention(block) () -> String = { node.name }
         object.setObject(tagName, forKeyedSubscript: "tagName" as NSString)
 
-        let select: @convention(block) (String) -> [JSValue] = { [weak self] rule in
-            guard let self else { return [] }
-            return CSSSelector.select(rule, in: node).map { self.wrapElement($0) }
+        let select: @convention(block) (String) -> JSValue = { [weak self] rule in
+            guard let self, let context = self.context else { return JSValue() }
+            let matched = CSSSelector.select(rule, in: node)
+            return JSEngine.makeElementListValue(matched, engine: self, in: context)
         }
         object.setObject(select, forKeyedSubscript: "select" as NSString)
 
-        let selectFirst: @convention(block) (String) -> JSValue = { [weak self, weak context] rule in
+        let selectFirst: @convention(block) (String) -> JSValue = { [weak self] rule in
             guard let self, let first = CSSSelector.select(rule, in: node).first else {
-                return JSValue(undefinedIn: context)
+                return JSValue()
             }
             return self.wrapElement(first)
         }
@@ -794,12 +798,17 @@ final class JSEngine {
     /// 统一收口成一个返回非可选值的方法，既修类型又保留兜底。
     static func newObject(in context: JSContext) -> JSValue {
         if let object = JSValue(newObjectIn: context) { return object }
-        return JSValue(undefinedIn: context)
+        return JSValue()
     }
 
-    /// 上下文已不可用（引擎已释放）时的占位值。
+    /// 引擎已释放时的占位值。
+    ///
+    /// 旧实现是 JSValue(undefinedIn: nil) —— 用 nil 上下文构造 JSValue 属于
+    /// 未定义行为，把这个对象交回 JavaScriptCore 会在 JSC::evaluate 内部
+    /// 直接命中 breakpoint trap（SIGTRAP）。
+    /// JSValue() 的空值语义就等价于 undefined，且完全合法。
     static var undefinedValue: JSValue {
-        JSValue(undefinedIn: nil)
+        JSValue()
     }
 
 
@@ -821,6 +830,43 @@ final class JSEngine {
             }
         }
         return value.toString() ?? ""
+    }
+
+    /// 构造一个带 java.util.List 语义的 JS 值。
+    ///
+    /// 书源对集合的用法是 Java 的，不是 JavaScript 的：
+    /// 它们调 .size() / .get(i) / .isEmpty()，而不是读 .length。
+    /// 直接桥成 JS 数组会让这些调用全部变成 TypeError，
+    /// 而这些 TypeError 又发生在我们 @convention(block) 的回调返回路径上，
+    /// 很容易在 JavaScriptCore 内部升级成硬崩溃。
+    ///
+    /// 这里返回一个同时支持两套 API 的对象：数值索引、.length 让 JS 原生写法可用，
+    /// .size() / .get() / .iterator() 让 Java 写法可用。
+    static func makeListValue(_ items: [String], in context: JSContext) -> JSValue {
+        let array = items.map { $0 as NSString }
+        guard let value = JSValue(object: array, in: context) else { return JSValue() }
+        let list = context.objectForKeyedSubscript("__dxWrapList")
+        if let list, !list.isUndefined, let wrapped = list.call(withArguments: [value]) {
+            return wrapped
+        }
+        return value
+    }
+
+    /// 元素列表版本：把 HTMLNode 包装对象组成 List。
+    ///
+    /// 注意这里不能在 JS 侧组装：wrapElement 的结果是 JSValue，
+    /// 需要由它自己的上下文创建数组，跨上下文构造属未定义行为。
+    static func makeElementListValue(_ nodes: [HTMLNode], engine: JSEngine, in context: JSContext) -> JSValue {
+        let wrapped = nodes.map { engine.wrapElement($0, in: context) }
+        guard let array = JSValue(newArrayIn: context) else { return JSValue() }
+        for (index, element) in wrapped.enumerated() {
+            array.setObject(element, atIndexedSubscript: index)
+        }
+        let list = context.objectForKeyedSubscript("__dxWrapList")
+        if let list, !list.isUndefined, let result = list.call(withArguments: [array]) {
+            return result
+        }
+        return array
     }
 
     static func dictionaryFrom(_ value: JSValue) -> [String: Any]? {
