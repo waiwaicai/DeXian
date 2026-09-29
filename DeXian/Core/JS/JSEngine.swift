@@ -356,11 +356,63 @@ final class JSEngine {
         }
         java.setObject(replaceFont, forKeyedSubscript: "replaceFont" as NSString)
 
+
+        let encodeURIValue: @convention(block) (JSValue) -> String = { value in
+            JSEngine.stringFrom(value).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        }
+        java.setObject(encodeURIValue, forKeyedSubscript: "encodeURI" as NSString)
+
+        let encodeURIComponentValue: @convention(block) (JSValue) -> String = { value in
+            JSEngine.stringFrom(value).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        }
+        java.setObject(encodeURIComponentValue, forKeyedSubscript: "encodeURIComponent" as NSString)
+
+        let t2s: @convention(block) (JSValue) -> String = { value in
+            JSEngine.stringFrom(value)
+        }
+        java.setObject(t2s, forKeyedSubscript: "t2s" as NSString)
+        java.setObject(t2s, forKeyedSubscript: "s2t" as NSString)
+
+        let toast: @convention(block) (JSValue) -> Void = { value in
+            Log.debugLog("JS toast", JSEngine.stringFrom(value))
+        }
+        java.setObject(toast, forKeyedSubscript: "toast" as NSString)
+        java.setObject(toast, forKeyedSubscript: "longToast" as NSString)
+
+        let getUserAgent: @convention(block) () -> String = {
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        }
+        java.setObject(getUserAgent, forKeyedSubscript: "getUserAgent" as NSString)
+        java.setObject(getUserAgent, forKeyedSubscript: "getWebViewUA" as NSString)
+
+        let refreshExplore: @convention(block) () -> Void = {}
+        java.setObject(refreshExplore, forKeyedSubscript: "refreshExplore" as NSString)
+
         java.setObject(host.baseUrl, forKeyedSubscript: "url" as NSString)
         java.setObject(host.headers, forKeyedSubscript: "headerMap" as NSString)
 
         context.setObject(java, forKeyedSubscript: "java" as NSString)
-        _ = context.evaluateScript("var Packages = { java: java }; var JavaImporter = function(){};")
+        _ = context.evaluateScript("""
+            var Packages = {
+                java: {
+                    security: { MessageDigest: { getInstance: function() { return { digest: function() { return []; }, update: function() {} }; } } },
+                    nio: {}, io: {}
+                },
+                org: {
+                    jsoup: {
+                        Jsoup: {
+                            parse: function(html) { return { select: function() { return []; }, text: function() { return String(html || ""); }, html: function() { return String(html || ""); } }; },
+                            connect: function() { return { get: function() { return null; }, post: function() { return null; } }; }
+                        },
+                        nodes: { Document: {}, Element: {} }
+                    },
+                    javax: { crypto: {} },
+                    lang: { String: String, System: { currentTimeMillis: function() { return Date.now(); }, sleep: function() {} }, Thread: { sleep: function() {} } },
+                    util: { HashMap: function() { return { put: function() {}, get: function() { return null; }, containsKey: function() { return false; } }; }, Arrays: { copyOfRange: function(a, s, e) { return (a || []).slice(s, e); }, copyOf: function(a, n) { return (a || []).slice(0, n); } } }
+                }
+            };
+            var JavaImporter = function(){};
+        """)
     }
 
     private func setupSource(_ context: JSContext) {
@@ -428,6 +480,16 @@ final class JSEngine {
         }
         source.setObject(get, forKeyedSubscript: "get" as NSString)
 
+        source.setObject(getVariable, forKeyedSubscript: "getVariableMap" as NSString)
+        source.setObject(setVariable, forKeyedSubscript: "putVariable" as NSString)
+        source.setObject(setVariable, forKeyedSubscript: "setVariable" as NSString)
+        source.setObject(get, forKeyedSubscript: "getVariable" as NSString)
+        source.setObject(put, forKeyedSubscript: "setVariable" as NSString)
+        source.setObject(put, forKeyedSubscript: "putVariable" as NSString)
+        source.setObject(getLoginHeader, forKeyedSubscript: "getLoginHeader" as NSString)
+        source.setObject(getLoginInfoMap, forKeyedSubscript: "getLoginInfoMap" as NSString)
+        let refreshJSLib: @convention(block) () -> Void = {}
+        source.setObject(refreshJSLib, forKeyedSubscript: "refreshJSLib" as NSString)
         context.setObject(source, forKeyedSubscript: "source" as NSString)
     }
 
@@ -439,6 +501,17 @@ final class JSEngine {
         for (key, value) in host.bookInfo {
             book.setObject(value, forKeyedSubscript: key as NSString)
         }
+
+        let getBookVariable: @convention(block) (String) -> String? = { [weak self] name in
+            self?.host.variables[name]
+        }
+        book.setObject(getBookVariable, forKeyedSubscript: "getVariable" as NSString)
+
+        let putBookVariable: @convention(block) (String, JSValue) -> Void = { [weak self] name, value in
+            self?.host.variables[name] = JSEngine.stringFrom(value)
+        }
+        book.setObject(putBookVariable, forKeyedSubscript: "putVariable" as NSString)
+        book.setObject(putBookVariable, forKeyedSubscript: "setVariable" as NSString)
         context.setObject(book, forKeyedSubscript: "book" as NSString)
 
         let chapter = JSEngine.newObject(in: context)
@@ -450,6 +523,18 @@ final class JSEngine {
         for (key, value) in host.chapterInfo {
             chapter.setObject(value, forKeyedSubscript: key as NSString)
         }
+
+
+        let getChapterVariable: @convention(block) (String) -> String? = { [weak self] name in
+            self?.host.variables[name]
+        }
+        chapter.setObject(getChapterVariable, forKeyedSubscript: "getVariable" as NSString)
+
+        let putChapterVariable: @convention(block) (String, JSValue) -> Void = { [weak self] name, value in
+            self?.host.variables[name] = JSEngine.stringFrom(value)
+        }
+        chapter.setObject(putChapterVariable, forKeyedSubscript: "putVariable" as NSString)
+        chapter.setObject(putChapterVariable, forKeyedSubscript: "setVariable" as NSString)
         context.setObject(chapter, forKeyedSubscript: "chapter" as NSString)
     }
 
