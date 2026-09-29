@@ -1579,4 +1579,145 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("typeof source.getKey"), "function")
     }
 
+    // MARK: 正文完整性
+
+    /// 正文规则命中一整组段落时必须全部返回。
+    ///
+    /// 旧实现 string() = stringList().first，只拿第一段，
+    /// 表现就是「打开只显示几个字 / 只显示一半」。
+    func testContentRuleReturnsEveryMatchedParagraph() {
+        let html = """
+        <div class="read-content"><p>第一段正文</p><p>第二段正文</p><p>第三段正文</p></div>
+        """
+        let analyzer = AnalyzeRule(content: html)
+        analyzer.paragraphs = true
+        let text = analyzer.string("class.read-content@p@text")
+        XCTAssertTrue(text.contains("第一段正文"))
+        XCTAssertTrue(text.contains("第二段正文"))
+        XCTAssertTrue(text.contains("第三段正文"))
+    }
+
+    /// 地址字段取多值时只应保留第一条：多条用换行拼接会得到无法访问的地址。
+    func testFirstStringKeepsOnlyOneURL() {
+        let html = """
+        <div><a class="next" href="/c/2.htm">下一章</a><a class="next" href="/c/3.htm">下下章</a></div>
+        """
+        let analyzer = AnalyzeRule(content: html)
+        XCTAssertEqual(analyzer.firstString("class.next@href"), "/c/2.htm")
+        XCTAssertFalse(analyzer.firstString("class.next@href").contains("\n"))
+    }
+
+    // MARK: @put / @get
+
+    /// @put 声明的变量要被 @get 读到（57 个书源声明、204 个书源读取）。
+    func testPutThenGetVariable() {
+        var variables: [String: String] = [:]
+        var context = RuleContext(content: "<div id=\"bid\">42</div>", baseUrl: "https://a.com")
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        context.getVariable = { name in variables[name] ?? "" }
+
+        let analyzer = AnalyzeRule(context: context)
+        // @put 声明本身不产出正文，它只是副作用
+        _ = analyzer.string("@put:{id:id.bid@text}")
+        XCTAssertEqual(variables["id"], "42")
+        // 后续字段用 @get:{id} 取回同一个值
+        XCTAssertEqual(analyzer.string("@get:{id}"), "42")
+    }
+
+    /// @get 出现在 URL 模板中间时也要展开（例：https://h5.17k.com/list/@get:{id}.html）。
+    func testGetInsideURLTemplate() {
+        var variables: [String: String] = [:]
+        var context = RuleContext(content: "", baseUrl: "https://a.com")
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        context.getVariable = { name in variables[name] ?? "" }
+        variables["id"] = "12345"
+
+        let analyzer = AnalyzeRule(context: context)
+        XCTAssertEqual(analyzer.interpolate("https://h5.17k.com/list/@get:{id}.html"),
+                       "https://h5.17k.com/list/12345.html")
+    }
+
+    /// @put 的值可以是一条完整规则（含 ## 替换、选择器链）。
+    func testPutAcceptsFullRuleValue() {
+        var variables: [String: String] = [:]
+        var context = RuleContext(content: "<p class=\"tag\">玄幻</p>", baseUrl: "https://a.com")
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        context.getVariable = { name in variables[name] ?? "" }
+
+        let analyzer = AnalyzeRule(context: context)
+        _ = analyzer.string("@put:{k:class.tag@text##幻##幻小说}")
+        XCTAssertEqual(variables["k"], "玄幻小说")
+    }
+
+    // MARK: 列表规则给 JS 的 result 形态
+
+    /// 列表规则里 result 必须是元素对象：书源会写 result.toArray() / result.select()。
+    func testListRuleExposesElementsToJS() {
+        let html = "<ul><li><a href=\"/1\">一</a></li><li><a href=\"/2\">二</a></li></ul>"
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let items = analyzer.listItems("tag.li@js:result.toArray().map(function(el){return el.select('a').attr('href')})")
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(RuleUtil.asString(items[0]), "/1")
+        XCTAssertEqual(RuleUtil.asString(items[1]), "/2")
+    }
+
+    /// 文本规则里 result 必须是字符串：书源会写 result.match(...) / result.split(...)。
+    func testTextRuleExposesStringToJS() {
+        let html = "<div class=\"t\">时长 12.5万</div>"
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(analyzer.string("class.t@text@js:result.match(/\\d+?\\.\\d+万/g)[0]"), "12.5万")
+    }
+
+    /// 顶层 let 的脚本要能反复求值：否则同一条规则第二次执行报
+    /// "Can't create duplicate variable"，表现为「第一次能搜到、再搜就空白」。
+    func testTopLevelLetScriptRunsRepeatedly() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let script = "let txt = 'a'; let key = 'b'; txt + key"
+        XCTAssertEqual(engine.evaluateString(script), "ab")
+        XCTAssertEqual(engine.evaluateString(script), "ab")
+    }
+
+    /// 顶层 let 的变量不能泄漏到全局，否则第二次执行必然冲突。
+    func testTopLevelLetDoesNotLeakToGlobal() {
+        let engine = JSEngine(host: JSEngine.Host())
+        _ = engine.evaluate("let txt = 'x';")
+        XCTAssertEqual(engine.evaluateString("typeof txt"), "undefined")
+    }
+
+    /// 顶层 return 的脚本要能跑出结果（实测 4 段书源脚本这么写）。
+    func testTopLevelReturnScriptStillReturns() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("var a = 1; return a + 1;"), "2")
+    }
+
+    // MARK: JS 环境补齐
+
+    /// 裸包名 org / javax 必须可用（170 处 org.jsoup 调用依赖它）。
+    func testBarePackageNamesAreAvailable() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof org.jsoup.Jsoup.parse"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof javax.crypto.Cipher.getInstance"), "function")
+    }
+
+    /// 书源注释里的 helper 要能被 eval 出来并调用（40 篇书源这么写）。
+    func testHelperDefinedInSourceCommentIsCallable() {
+        let engine = JSEngine(host: JSEngine.Host())
+        _ = engine.evaluate("eval(String('function traditionalToSimplified(s){ return String(s); }'))")
+        XCTAssertEqual(engine.evaluateString("traditionalToSimplified('測試')"), "測試")
+    }
+
+    /// java.get 必须同时支持「读变量」和「HTTP GET」两种签名。
+    func testJavaGetOverloads() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof java.get"), "function")
+        XCTAssertEqual(engine.evaluateString("java.get('missing') === undefined || java.get('missing') === null ? 'empty' : 'value'"),
+                       "empty")
+    }
+
 }

@@ -48,12 +48,28 @@ enum RuleValue {
         }
     }
 
-    /// 供 JS 的 result 变量使用：单项给字符串，多项给数组。
-    var jsValue: Any? {
+    /// 供 JS 的 result 变量使用。
+    ///
+    /// `result` 的形态**取决于这条规则求的是什么**，这一点与 Legado 一致：
+    ///
+    /// - 列表规则（书架列表 / 目录列表，走 `listItems`）在 Legado 里是
+    ///   `AnalyzeRule.getElements`，中间值给 JS 的是 **jsoup 元素对象**。
+    ///   书源据此写 `result.toArray()` / `result.select('a')`。
+    /// - 文本规则（书名 / 正文 / 作者，走 `string`、`stringList`）在 Legado 里
+    ///   是 `getString` / `getStringList`，中间值给 JS 的是 **字符串**。
+    ///   书源据此写 `result.match(…)` / `result.replace(…)`。
+    ///
+    /// 所以这里必须按调用方区分，不能一刀切：列表规则传节点，
+    /// 文本规则传文本。传错的后果分别是
+    /// "result.match is not a function" 与 "result.toArray is not a function"。
+    func jsValue(elements: Bool) -> Any? {
         switch self {
         case .nodes(let nodes):
-            let values = nodes.map { XPathEngine.stringValue(of: $0) }
-            return values.count == 1 ? values[0] : values
+            guard elements else {
+                let values = nodes.map { XPathEngine.stringValue(of: $0) }
+                return values.count == 1 ? values[0] : values
+            }
+            return nodes.count == 1 ? nodes[0] : nodes
         case .strings(let values):
             return values.count == 1 ? values[0] : values
         case .raw(let any):
@@ -127,21 +143,56 @@ final class AnalyzeRule {
     /// 只在解析正文时开启；搜索/目录等短字段仍用纯文本。
     var paragraphs = false
 
+    /// 文本字段取值（对齐 Legado 的 getString）。
+    ///
+    /// 关键：多条匹配必须换行合并，而不是只取第一条。
+    ///
+    /// 正文规则绝大多数是「选中一整组段落」的写法，例如
+    /// `@css:div.read-content p@text`，它会命中列表里所有 <p>。
+    /// 只取第一条的话整章正文只剩开头几个字 ——
+    /// 用户看到的「打开只显示几个字 / 只显示一半」就是这里来的。
+    /// Legado 的行为是 getStringList(rule).joinToString("\n")，对齐它。
     func string(_ rule: String?) -> String {
+        stringList(rule).joined(separator: "\n")
+    }
+
+    /// 单值字段取值（对齐 Legado 的 getString0 / isUrl 分支）。
+    ///
+    /// 地址类字段（书籍地址 / 目录地址 / 下一页地址 / 封面）天然只有一个值。
+    /// 若把多条匹配用换行拼起来，会得到一段根本无法访问的地址，
+    /// 因此这些调用点必须走这里，而不是 string()。
+    func firstString(_ rule: String?) -> String {
         stringList(rule).first ?? ""
     }
 
     func stringList(_ rule: String?) -> [String] {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
-            let value = evaluateRule(branch)
+            let value = evaluateRule(branch, elements: false)
             // 正文抽取时保留段落：节点结果若直接拼接子文本，
             // <p>…</p><p>…</p> 会被压成一整行，阅读时排版全乱。
             // 列表 / 标题等短字段仍走纯文本，避免书名里混进换行。
             let strings = (paragraphs ? value.paragraphStrings : value.strings)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            if !strings.isEmpty { return strings }
+            // 单条字符串结果按换行再拆一层（对齐 Legado 的
+            // ``if (result is String) result = result.split("\n")``）。
+            //
+            // 书源里有大量「JS 里 join("\n") 拼出一串条目」的写法，
+            // 例如目录：``<js>…list.join("\n")</js>``。
+            // 不拆的话整串只算一个条目，界面表现就是「章节不全」。
+            // 文本字段走 string() 时会用 "\n" 回拼，内容不受影响。
+            //
+            // 只在「结果为单条字符串」时拆，与 Legado 的 `result is String` 一致：
+            // 多条目结果本身就已是逐条分开的，再拆一次会把条目内部
+            // 本来就存在的换行（如正文段落）误当成条目分界。
+            var expanded = strings
+            if !paragraphs, strings.count == 1, strings[0].contains("\n") {
+                expanded = strings[0].components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            if !expanded.isEmpty { return expanded }
         }
         return []
     }
@@ -154,7 +205,7 @@ final class AnalyzeRule {
     func htmlString(_ rule: String?) -> String {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
         for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
-            let value = evaluateRule(branch)
+            let value = evaluateRule(branch, elements: false)
             switch value {
             case .nodes(let nodes):
                 let html = nodes.map { $0.outerHTML }.joined(separator: "\n")
@@ -183,36 +234,60 @@ final class AnalyzeRule {
     // MARK: 规则链
 
     /// 求值单条规则（含 @ 链与内嵌 <js> 段）。
-    private func evaluateRule(_ rule: String) -> RuleValue {
+    ///
+    /// `elements` 表示这条规则是否在求列表（见 `RuleValue.jsValue(elements:)`）：
+    /// 列表规则要把节点原样交给 JS 当元素用，文本规则要给字符串。
+    private func evaluateRule(_ rule: String, elements: Bool) -> RuleValue {
         var text = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .strings([]) }
 
+        // `@put:{…}` 不是规则的一部分，先摘出来落地成变量（对齐 Legado 的
+        // splitPutRule + putRule）。实测 57 个书源用它声明详情页字段，
+        // 204 个书源用 @get:{…} 读取 —— 只读不写会让这些源的书名 / 作者 /
+        // 简介 / 封面 / 目录地址全部为空。
+        let (withoutPuts, puts) = RuleSyntax.splitPutRule(text)
+        if !puts.isEmpty {
+            applyPuts(puts)
+            text = withoutPuts.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return .strings([]) }
+        }
+
         let (core, replacements) = RuleSyntax.splitReplaceRule(text)
-        var value = evaluateChained(core)
+        var value = evaluateChained(core, elements: elements)
         if !replacements.isEmpty {
             value = .strings(applyReplacements(value.strings, replacements: replacements))
         }
         return value
     }
 
+    /// 落地 `@put:{…}` 声明的变量。
+    ///
+    /// 取值一律按「文本规则」求值（对齐 Legado 的 putRule → getString），
+    /// 结果写进书源变量表，供同一书源其它字段的 `@get:{…}` 读取。
+    private func applyPuts(_ puts: [(String, String)]) {
+        for (name, rule) in puts {
+            context.putVariable?(name, string(rule))
+        }
+    }
+
     /// 求值规则；内嵌 <js>…</js> 段先跑，其结果作为后续规则的输入。
-    private func evaluateChained(_ text: String) -> RuleValue {
+    private func evaluateChained(_ text: String, elements: Bool) -> RuleValue {
         let pieces = RuleSyntax.splitJSSegments(text)
         guard pieces.count > 1 else {
             let segments = RuleSyntax.splitChain(text)
             guard !segments.isEmpty else { return .strings([]) }
             var value = evaluateBase(segments[0])
-            for segment in segments.dropFirst() { value = applyTransform(segment, to: value) }
+            for segment in segments.dropFirst() { value = applyTransform(segment, to: value, elements: elements) }
             return value
         }
 
         var value = RuleValue.strings([])
         for (isJS, piece) in pieces {
             if isJS {
-                let result = runJS(piece, previous: value.isEmpty ? nil : value.jsValue)
+                let result = runJS(piece, previous: value.isEmpty ? nil : value.jsValue(elements: elements))
                 value = .raw(result ?? "")
             } else {
-                value = evaluateSegment(piece, previous: value)
+                value = evaluateSegment(piece, previous: value, elements: elements)
             }
         }
         return value
@@ -223,17 +298,17 @@ final class AnalyzeRule {
     /// 前面没有 JS 结果时按普通规则（可能含 @ 链）求值；
     /// 已有 JS 结果时，对齐 Legado：以该结果为内容重新起一条规则，
     /// 例 `<js>GetList(result)</js>$.data.list[*]`。
-    private func evaluateSegment(_ piece: String, previous: RuleValue) -> RuleValue {
+    private func evaluateSegment(_ piece: String, previous: RuleValue, elements: Bool) -> RuleValue {
         let segments = RuleSyntax.splitChain(piece)
         guard !segments.isEmpty else { return previous }
         if previous.isEmpty {
             var value = evaluateBase(segments[0])
-            for segment in segments.dropFirst() { value = applyTransform(segment, to: value) }
+            for segment in segments.dropFirst() { value = applyTransform(segment, to: value, elements: elements) }
             return value
         }
         // 链式记号（@href / @text / @js: 等）直接作用在上一段结果上
         if segments.count == 1, isTransformMarker(segments[0]) {
-            return applyTransform(segments[0], to: previous)
+            return applyTransform(segments[0], to: previous, elements: elements)
         }
         let content: Any?
         switch previous {
@@ -247,7 +322,7 @@ final class AnalyzeRule {
         nested.bookVariables = bookVariables
         nested.chapterVariables = chapterVariables
         var value = nested.evaluateBase(segments[0])
-        for segment in segments.dropFirst() { value = nested.applyTransform(segment, to: value) }
+        for segment in segments.dropFirst() { value = nested.applyTransform(segment, to: value, elements: elements) }
         return value
     }
 
@@ -276,7 +351,8 @@ final class AnalyzeRule {
             text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
         let (core, _) = RuleSyntax.splitReplaceRule(text)
-        let value = evaluateChained(core)
+        // 列表规则：`result` 交给 JS 时保持元素形态（对齐 Legado 的 getElements）
+        let value = evaluateChained(core, elements: true)
         var items: [Any] = []
 
         switch value {
@@ -292,6 +368,22 @@ final class AnalyzeRule {
             } else {
                 items = [any]
             }
+        }
+
+        // 单条字符串结果按换行拆开（对齐 Legado 的
+        // ``if (result is String) result = result.split("\n")``）。
+        //
+        // 目录规则里常见 ``<js>…list.join("\n")</js>`` 这类写法：
+        // JS 返回的是「一整串用换行拼起来的章节」。Legado 会把整串拆成条目，
+        // 不拆就只算一条，界面上表现为「章节不全 / 目录只有一条」。
+        //
+        // 只在**结果为单条字符串**时才拆：多条目结果本身已经是逐条分开的
+        // （节点列表 / 字符串数组），此时把每一项再拆一次反而会把正文
+        // 强行切碎 —— 那是「正文被截断」的另一种成因。
+        if items.count == 1, let text = items[0] as? String, text.contains("\n") {
+            items = text.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         }
 
         if items.count == 1, let array = items[0] as? [Any] {
@@ -310,9 +402,16 @@ final class AnalyzeRule {
             text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
         let interpolated = interpolate(text)
-        guard !interpolated.isBlank else { return .strings([]) }
+        // `@get:{key}` 取的是同书源 `@put:{…}` 存下的变量（对齐 Legado 的
+        // makeUpRule）。它可能出现在纯规则、URL 模板，甚至 JS 片段里
+        // （实测 2 处写在 <js> 内），所以统一在进入规则识别之前展开，
+        // 这样三种位置都能拿到值。
+        let expanded = RuleSyntax.expandGets(interpolated) { key in
+            context.getVariable?(key) ?? ""
+        }
+        guard !expanded.isBlank else { return .strings([]) }
 
-        let (kind, body) = RuleSyntax.detectKind(interpolated)
+        let (kind, body) = RuleSyntax.detectKind(expanded)
 
         switch kind {
         case .javascript:
@@ -345,7 +444,7 @@ final class AnalyzeRule {
             return .raw(results.count == 1 ? results[0] : results)
 
         case .regex:
-            return .strings(applyRegexRule(interpolated))
+            return .strings(applyRegexRule(expanded))
 
         case .xpath, .css:
             guard let document = context.document else {
@@ -365,30 +464,30 @@ final class AnalyzeRule {
             return .nodes(nodes)
 
         case .literal:
-            return .strings([interpolated])
+            return .strings([expanded])
         }
     }
 
     /// 链式转换（@ 之后的段）
-    private func applyTransform(_ segment: String, to value: RuleValue) -> RuleValue {
+    private func applyTransform(_ segment: String, to value: RuleValue, elements: Bool) -> RuleValue {
         let text = segment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return value }
         let lowered = text.lowercased()
 
         if lowered.hasPrefix("js:") {
             let script = String(text.dropFirst(3))
-            let result = runJS(script, previous: value.jsValue)
+            let result = runJS(script, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("@js:") {
             let script = String(text.dropFirst(4))
-            let result = runJS(script, previous: value.jsValue)
+            let result = runJS(script, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("<js>") {
             let (kind, body) = RuleSyntax.detectKind(text)
             guard kind == .javascript else { return value }
-            let result = runJS(body, previous: value.jsValue)
+            let result = runJS(body, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("json:") {
@@ -564,20 +663,26 @@ final class AnalyzeRule {
     // MARK: 插值
 
     func interpolate(_ text: String) -> String {
-        guard text.contains("{{") else { return text }
+        // `@get:{key}` 也可能直接写在 URL 模板里
+        // （例：`https://h5.17k.com/list/@get:{id}.html`），
+        // 与 {{…}} 一样属于求值前必须替换掉的记号。
+        let source = RuleSyntax.expandGets(text) { key in
+            context.getVariable?(key) ?? ""
+        }
+        guard source.contains("{{") else { return source }
         var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            guard let openRange = text.range(of: "{{", range: index..<text.endIndex) else {
-                result += text[index...]
+        var index = source.startIndex
+        while index < source.endIndex {
+            guard let openRange = source.range(of: "{{", range: index..<source.endIndex) else {
+                result += source[index...]
                 break
             }
-            result += text[index..<openRange.lowerBound]
-            guard let closeRange = text.range(of: "}}", range: openRange.upperBound..<text.endIndex) else {
-                result += text[openRange.lowerBound...]
+            result += source[index..<openRange.lowerBound]
+            guard let closeRange = source.range(of: "}}", range: openRange.upperBound..<source.endIndex) else {
+                result += source[openRange.lowerBound...]
                 break
             }
-            let expression = String(text[openRange.upperBound..<closeRange.lowerBound])
+            let expression = String(source[openRange.upperBound..<closeRange.lowerBound])
             result += resolveInterpolation(expression)
             index = closeRange.upperBound
         }

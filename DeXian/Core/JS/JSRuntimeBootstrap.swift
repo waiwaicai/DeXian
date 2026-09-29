@@ -99,6 +99,44 @@ function __dxWrapList(items) {
     forEach: function (fn) { for (var i = 0; i < data.length; i++) { fn(data[i], i); } },
     sort: function (fn) { data.sort(fn); __dxRebuildList(list, data); return list; },
     reverse: function () { data.reverse(); __dxRebuildList(list, data); return list; },
+    // jsoup Elements 的集合方法。书源会把规则求出的列表直接当元素集合用，
+    // 例：result.toArray() 之后仍会调 .attr('href') / .text() / .select('a')。
+    // 元素列表由 Swift 侧包装（每个元素自带 attr/text/select），
+    // 这里把集合级调用按「逐个元素取值再收集」实现，与 jsoup 语义一致。
+    attr: function (name) {
+      if (arguments.length === 0) { return data.length ? (data[0].attr ? data[0].attr('') : '') : ''; }
+      if (arguments.length > 1) {
+        for (var i = 0; i < data.length; i++) { if (data[i].attr) { data[i].attr(name, arguments[1]); } }
+        return list;
+      }
+      return data.length && data[0].attr ? data[0].attr(name) : '';
+    },
+    text: function () { return data.length && data[0].text ? data[0].text() : ''; },
+    html: function () { return data.length && data[0].html ? data[0].html() : ''; },
+    outerHtml: function () { return data.length && data[0].outerHtml ? data[0].outerHtml() : ''; },
+    eachAttr: function (name) {
+      var out = [];
+      for (var i = 0; i < data.length; i++) { if (data[i].attr) { out.push(data[i].attr(name)); } }
+      return out;
+    },
+    eachText: function () {
+      var out = [];
+      for (var i = 0; i < data.length; i++) { if (data[i].text) { out.push(data[i].text()); } }
+      return out;
+    },
+    select: function (selector) {
+      var out = [];
+      for (var i = 0; i < data.length; i++) {
+        if (!data[i].select) { continue; }
+        var found = data[i].select(selector);
+        var n = (found && typeof found.size === 'function') ? found.size() : (found ? found.length : 0);
+        for (var j = 0; j < n; j++) { out.push(found.get ? found.get(j) : found[j]); }
+      }
+      return __dxWrapList(out);
+    },
+    eq: function (i) { return data[i | 0]; },
+    empty: function () { return false; },
+    clone: function () { return __dxWrapList(data.slice()); },
     iterator: function () {
       var cursor = 0;
       return {
@@ -917,6 +955,23 @@ var JavaImporter = function () {
 function importPackage(ns) { return ns; }
 function importClass(ns) { return ns; }
 function importJava() {}
+
+// ---------------------------------------------------------------------------
+// 裸包名。
+//
+// Rhino 里 org / javax / java / com 是全局可用的包对象，书源据此写
+//     org.jsoup.Jsoup.parse(html)
+//     javax.crypto.Cipher.getInstance('AES')
+// 而不带 Packages. 前缀。实测语料里这种写法有 170 处，缺一个就是
+// "ReferenceError: Can't find variable: org"，整条规则作废。
+//
+// 只暴露真正常用的三棵树；java 不作为裸名暴露 ——
+// 书源里的 `java` 指的是宿主注入的 java 对象（java.ajax 等），
+// 用包名覆盖它会让所有 java.* 调用消失。
+// ---------------------------------------------------------------------------
+var org = Packages.org;
+var javax = Packages.javax;
+var com = {};
 
 
 // ---------------------------------------------------------------------------

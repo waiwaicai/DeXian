@@ -338,4 +338,117 @@ enum RuleSyntax {
         }
         return text
     }
+
+    // MARK: @put / @get
+
+    /// 摘出规则里的 `@put:{…}` 声明，返回 (剩余规则, [(变量名, 取值规则)])。
+    ///
+    /// 对齐 Legado 的 `splitPutRule`：`@put:` **不是规则的一部分**，
+    /// 它在每次求值前被摘掉，并把声明的变量算出来存进书源变量表，
+    /// 之后由同一书源其它字段里的 `@get:{…}` 读取。
+    ///
+    /// 语料实测（1296.json，855 个源）：57 个源用 `@put:` 声明、
+    /// 204 个源用 `@get:` 读取。两者必须成对实现 —— 只读不写会让
+    /// 这些源的详情页字段全部取不到值（书名 / 作者 / 简介 / 封面空白）。
+    static func splitPutRule(_ rule: String) -> (core: String, puts: [(String, String)]) {
+        guard rule.range(of: "@put:", options: .caseInsensitive) != nil else { return (rule, []) }
+        var core = ""
+        var puts: [(String, String)] = []
+        var index = rule.startIndex
+        while index < rule.endIndex {
+            guard let open = rule.range(of: "@put:{", options: .caseInsensitive, range: index..<rule.endIndex),
+                  let close = rule.range(of: "}", options: [], range: open.upperBound..<rule.endIndex) else {
+                core += rule[index...]
+                break
+            }
+            core += rule[index..<open.lowerBound]
+            puts.append(contentsOf: parsePutBody(String(rule[open.upperBound..<close.lowerBound])))
+            index = close.upperBound
+        }
+        return (core, puts)
+    }
+
+    /// 解析 `@put:` 的花括号内容。
+    ///
+    /// 写法与 Legado 一致：宽松的 JSON 对象，键可以带引号也可以裸写，
+    /// 值是一条规则（可能含 `##` 替换、`|` 选择器、换行）。
+    /// 语料里的实际形态：
+    ///     {"bid":"$.id"}
+    ///     {id:$.novelid||$.novelId}
+    ///     {n:"[property$=book_name]@content", a:"[property$=author]@content"}
+    private static func parsePutBody(_ body: String) -> [(String, String)] {
+        var result: [(String, String)] = []
+        for entry in splitTopLevel(body, separator: ",") {
+            guard let colon = firstTopLevelColon(entry) else { continue }
+            let key = unquote(String(entry[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines))
+            let value = unquote(String(entry[entry.index(after: colon)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+            guard !key.isEmpty, !value.isEmpty else { continue }
+            result.append((key, value))
+        }
+        return result
+    }
+
+    /// 找到第一个不在引号 / 括号里的冒号（键值分隔符）。
+    private static func firstTopLevelColon(_ text: String) -> String.Index? {
+        var depth = 0
+        var quote: Character?
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if let activeQuote = quote {
+                if character == activeQuote { quote = nil }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            } else if character == "[" || character == "(" || character == "{" {
+                depth += 1
+            } else if character == "]" || character == ")" || character == "}" {
+                depth -= 1
+            } else if character == ":", depth == 0 {
+                return index
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    /// 去掉一层包裹的引号（JSON 语法，不属于规则本身）。
+    private static func unquote(_ text: String) -> String {
+        guard text.count >= 2 else { return text }
+        let first = text.first
+        guard first == "\"" || first == "'" else { return text }
+        guard text.last == first else { return text }
+        return String(text.dropFirst().dropLast())
+    }
+
+    /// 找到规则里第一处 `@get:{key}`。
+    static func firstGetSubstitution(_ rule: String) -> (range: Range<String.Index>, key: String)? {
+        guard let open = rule.range(of: "@get:{", options: .caseInsensitive),
+              let close = rule.range(of: "}", options: [], range: open.upperBound..<rule.endIndex) else {
+            return nil
+        }
+        let key = String(rule[open.upperBound..<close.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (open.lowerBound..<close.upperBound, key)
+    }
+
+    /// 把规则里所有 `@get:{key}` 换成取值闭包给出的文本。
+    static func expandGets(_ rule: String, value: (String) -> String) -> String {
+        guard rule.range(of: "@get:", options: .caseInsensitive) != nil else { return rule }
+        var output = ""
+        var index = rule.startIndex
+        while index < rule.endIndex {
+            guard let open = rule.range(of: "@get:{", options: .caseInsensitive, range: index..<rule.endIndex),
+                  let close = rule.range(of: "}", options: [], range: open.upperBound..<rule.endIndex) else {
+                output += rule[index...]
+                break
+            }
+            output += rule[index..<open.lowerBound]
+            let key = String(rule[open.upperBound..<close.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            output += value(key)
+            index = close.upperBound
+        }
+        return output
+    }
 }

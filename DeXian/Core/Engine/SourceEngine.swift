@@ -151,9 +151,9 @@ final class SourceEngine {
             info.wordCount = ruleAnalyzer.string(source.bookInfoRule.wordCount).nilIfBlank
             info.lastChapter = ruleAnalyzer.string(source.bookInfoRule.lastChapter).nilIfBlank
             info.intro = ruleAnalyzer.string(source.bookInfoRule.intro).nilIfBlank
-            let cover = ruleAnalyzer.string(source.bookInfoRule.coverUrl)
+            let cover = ruleAnalyzer.firstString(source.bookInfoRule.coverUrl)
             info.coverUrl = RuleUtil.absoluteURL(cover, base: source.url).nilIfBlank
-            let toc = ruleAnalyzer.string(source.bookInfoRule.tocUrl)
+            let toc = ruleAnalyzer.firstString(source.bookInfoRule.tocUrl)
             info.tocUrl = toc.isEmpty ? nil : RuleUtil.absoluteURL(toc, base: source.url)
             return info
         }
@@ -179,9 +179,9 @@ final class SourceEngine {
         info.wordCount = detailAnalyzer.string(source.bookInfoRule.wordCount).nilIfBlank
         info.lastChapter = detailAnalyzer.string(source.bookInfoRule.lastChapter).nilIfBlank
         info.intro = detailAnalyzer.string(source.bookInfoRule.intro).nilIfBlank
-        let cover = detailAnalyzer.string(source.bookInfoRule.coverUrl)
+        let cover = detailAnalyzer.firstString(source.bookInfoRule.coverUrl)
         info.coverUrl = RuleUtil.absoluteURL(cover, base: target).nilIfBlank
-        let toc = detailAnalyzer.string(source.bookInfoRule.tocUrl)
+        let toc = detailAnalyzer.firstString(source.bookInfoRule.tocUrl)
         info.tocUrl = toc.isEmpty ? nil : RuleUtil.absoluteURL(toc, base: target)
         return info
     }
@@ -202,7 +202,7 @@ final class SourceEngine {
         for item in items {
             let itemAnalyzer = makeAnalyzer(content: item, baseUrl: target, js: js)
             let title = itemAnalyzer.string(source.tocRule.chapterName)
-            var chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+            var chapterURL = itemAnalyzer.firstString(source.tocRule.chapterUrl)
             // 同上：目录项通常是 <a>，规则没给 chapterUrl 时取 href。
             if chapterURL.trimmed.isEmpty { chapterURL = elementHref(in: item) }
             guard !title.isEmpty || !chapterURL.isEmpty else { continue }
@@ -218,7 +218,7 @@ final class SourceEngine {
         }
 
         // 翻页目录
-        var nextURL = listAnalyzer.string(source.tocRule.nextTocUrl)
+        var nextURL = listAnalyzer.firstString(source.tocRule.nextTocUrl)
         var pageCount = 0
         while !nextURL.isEmpty, pageCount < 20 {
             pageCount += 1
@@ -230,7 +230,7 @@ final class SourceEngine {
             for item in nextItems {
                 let itemAnalyzer = makeAnalyzer(content: item, baseUrl: resolvedNext, js: js)
                 let title = itemAnalyzer.string(source.tocRule.chapterName)
-                var chapterURL = itemAnalyzer.string(source.tocRule.chapterUrl)
+                var chapterURL = itemAnalyzer.firstString(source.tocRule.chapterUrl)
                 if chapterURL.trimmed.isEmpty { chapterURL = elementHref(in: item) }
                 guard !title.isEmpty || !chapterURL.isEmpty else { continue }
                 chapters.append(BookChapter(
@@ -241,7 +241,7 @@ final class SourceEngine {
                 ))
                 index += 1
             }
-            let following = nextAnalyzer.string(source.tocRule.nextTocUrl)
+            let following = nextAnalyzer.firstString(source.tocRule.nextTocUrl)
             if following == nextURL { break }
             nextURL = following
             target = resolvedNext
@@ -286,7 +286,7 @@ final class SourceEngine {
         var images = extractImages(from: contentHTML.isEmpty ? text : contentHTML, baseUrl: parsed.url)
 
         // 正文翻页
-        var nextURLString = contentAnalyzer.string(source.contentRule.nextContentUrl)
+        var nextURLString = contentAnalyzer.firstString(source.contentRule.nextContentUrl)
         var pageCount = 0
         while !nextURLString.isEmpty, pageCount < 10 {
             pageCount += 1
@@ -299,7 +299,7 @@ final class SourceEngine {
             text += "\n" + nextText
             let nextHTML = nextAnalyzer.htmlString(source.contentRule.content)
             images.append(contentsOf: extractImages(from: nextHTML.isEmpty ? nextText : nextHTML, baseUrl: nextURL))
-            let following = nextAnalyzer.string(source.contentRule.nextContentUrl)
+            let following = nextAnalyzer.firstString(source.contentRule.nextContentUrl)
             if following == nextURLString { break }
             nextURLString = following
         }
@@ -422,7 +422,7 @@ final class SourceEngine {
         var images = extractImages(from: value, baseUrl: parsed.url)
 
         // 翻页
-        var nextURLString = contentAnalyzer.string(source.contentRule.nextContentUrl)
+        var nextURLString = contentAnalyzer.firstString(source.contentRule.nextContentUrl)
         var pageCount = 0
         while !nextURLString.isEmpty, pageCount < 10 {
             pageCount += 1
@@ -431,7 +431,7 @@ final class SourceEngine {
             let nextAnalyzer = makeAnalyzer(content: nextContent, baseUrl: nextURL, js: js)
             let nextValue = nextAnalyzer.string(source.contentRule.content)
             images.append(contentsOf: extractImages(from: nextValue.isEmpty ? nextContent : nextValue, baseUrl: nextURL))
-            let following = nextAnalyzer.string(source.contentRule.nextContentUrl)
+            let following = nextAnalyzer.firstString(source.contentRule.nextContentUrl)
             if following == nextURLString { break }
             nextURLString = following
         }
@@ -559,6 +559,15 @@ final class SourceEngine {
         var host = JSEngine.Host()
         host.sourceKey = source.id
         host.sourceName = source.name
+        // 书源元信息：脚本用 source.bookSourceComment 解 helper、
+        // 用 source.getKey()/source.bookSourceUrl 拼请求地址，
+        // 用 source.loginUrl 走登录流程。
+        host.sourceUrl = source.url
+        host.sourceComment = source.bookSourceComment
+        host.variableComment = source.variableComment
+        host.sourceHeader = source.header
+        host.loginUrl = source.loginUrl
+        host.concurrentRate = source.concurrentRate
         host.baseUrl = source.url
         host.headers = headers
         host.bookInfo = bookInfo
@@ -670,14 +679,14 @@ final class SourceEngine {
         analyzer.key = keyword
 
         let name = analyzer.string(rule.name)
-        var bookURL = analyzer.string(rule.bookUrl)
+        var bookURL = analyzer.firstString(rule.bookUrl)
         // 书源没写 bookUrl（只写了 bookList + name）时，Legado 会退回取元素自身的
         // href；yckceo 上一大批源都是这种写法，不回退就会得到空地址。
         if bookURL.trimmed.isEmpty { bookURL = elementHref(in: item) }
         guard !name.isEmpty || !bookURL.isEmpty else { return nil }
 
         let author = analyzer.string(rule.author)
-        let cover = analyzer.string(rule.coverUrl)
+        let cover = analyzer.firstString(rule.coverUrl)
 
         return SearchBook(
             name: name.isEmpty ? "未命名" : name,

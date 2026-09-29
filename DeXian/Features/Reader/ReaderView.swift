@@ -766,13 +766,16 @@ struct PagedReaderView: View {
         // 尺寸还没测量好：保持现状，等下一次尺寸回调再算
         guard size.width > 40, size.height > 80 else { return }
 
-        // 顶部与底部内边距必须从可用高度里扣掉，否则每页末尾的字会被裁掉。
-        // 底栏只有在显示时才需要额外扣掉它那一行的高度 ——
-        // 否则关掉底栏后会白留一行，每页少排一行字。
+        // 可用高度必须与**实际渲染**的布局完全对齐，多扣一分就会
+        // 「每页少排一行、正文停在半空」。
+        //
+        // 正文外层只加了三种内边距：.horizontal(xl)、.top(topInset)、
+        // .bottom(bottomInset)；底栏显示时再占掉它自己那一行。
+        // 这里就按这三项加底栏高度计算，不再额外多扣 ——
+        // 旧实现多减了 xl+lg 共 36pt，正好是一行字的高度。
         let footerHeight: CGFloat = settings.showPageFooter ? 34 : 0
         let reserved: CGFloat = ReaderMetrics.topInset
             + ReaderMetrics.bottomInset
-            + Theme.Spacing.xl + Theme.Spacing.lg
             + footerHeight
         let layout = PageSplitter.Layout(
             font: PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize),
