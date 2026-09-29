@@ -1649,6 +1649,31 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(variables["k"], "玄幻小说")
     }
 
+    /// 替换完成后的模板结果是**文本**，不能再当选择器求值。
+    ///
+    /// 对齐 Legado：命中 evalPattern（@get: / {{}}）时 mode 置为 Regex，
+    /// getString 的 `else -> sourceRule.rule` 分支直接返回替换后的文本。
+    /// 若再走一遍 CSS 选择器，书名 / 作者 / 简介会整段变成空。
+    func testTemplateResultIsTextNotSelector() {
+        var variables: [String: String] = ["n": "斗破苍穹"]
+        var context = RuleContext(content: "<div>无关内容</div>", baseUrl: "https://a.com")
+        context.getVariable = { name in variables[name] ?? "" }
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        let analyzer = AnalyzeRule(context: context)
+
+        XCTAssertEqual(analyzer.string("@get:{n}"), "斗破苍穹")
+        XCTAssertEqual(analyzer.string("{{bookName}}"), "斗破苍穹")
+        // 模板与选择器并存时仍然按选择器求值，不能被拍成文本
+        XCTAssertTrue(analyzer.string("class.none@text").isEmpty)
+    }
+
+    /// 纯静态选择器规则不受模板分支影响。
+    func testPlainSelectorStillEvaluated() {
+        let analyzer = AnalyzeRule(content: "<h3 class=\"name\">斗破苍穹</h3>")
+        XCTAssertEqual(analyzer.string("class.name@text"), "斗破苍穹")
+        XCTAssertEqual(analyzer.firstString("class.name@text"), "斗破苍穹")
+    }
+
     // MARK: 列表规则给 JS 的 result 形态
 
     /// 列表规则里 result 必须是元素对象：书源会写 result.toArray() / result.select()。

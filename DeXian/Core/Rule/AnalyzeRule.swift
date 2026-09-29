@@ -270,6 +270,17 @@ final class AnalyzeRule {
         }
     }
 
+    /// 规则是否以「选择器 / 路径」记号开头（而不是纯模板文本）。
+    private static func startsWithRuleMarker(_ text: String) -> Bool {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return false }
+        for prefix in ["class.", "tag.", "id.", "text.", "children", "@css:", "@xpath:",
+                       "@json:", "@regex:", "@@", "$.", "$[", "//", "/html", "/body", "("] {
+            if value.hasPrefix(prefix) { return true }
+        }
+        return false
+    }
+
     /// 求值规则；内嵌 <js>…</js> 段先跑，其结果作为后续规则的输入。
     private func evaluateChained(_ text: String, elements: Bool) -> RuleValue {
         let pieces = RuleSyntax.splitJSSegments(text)
@@ -410,6 +421,29 @@ final class AnalyzeRule {
             context.getVariable?(key) ?? ""
         }
         guard !expanded.isBlank else { return .strings([]) }
+
+        // 含 `{{…}}` / `@get:{…}}` 的规则，替换完成后结果是**文本**，
+        // 不能再当成选择器去求值。
+        //
+        // 对齐 Legado：`SourceRule` 初始化时若匹配到 evalPattern
+        // （即 `@get:{…}` / `{{…}}`），会把 mode 置为 Regex
+        // （AnalyzeRule.kt:527-533），也就是「把替换后的内容当文本用」，
+        // 而不是当 CSS/XPath 选择器。
+        //
+        // 书源普遍这么写详情页字段：
+        //     @get:{n}s            → 书名文本
+        //     {{$.id}}             → 书籍编号
+        //     {{book.name}}        → 书名
+        // 若再走一遍选择器，整段文本会被当成一个 CSS 选择器，
+        // 一条都匹配不到 —— 表现就是书名 / 作者 / 简介全空。
+        // 只在这条规则**除了模板记号之外没有别的规则语法**时才当文本。
+        // 少数规则是「选择器/JSON 路径 + 模板」的组合，例如
+        //     $[?(@.chapter_name=="{{chapter.title}}")]
+        // 展开后仍要按 JSON 路径求值，不能拍成文本。
+        if (text.contains("{{") || text.lowercased().contains("@get:")),
+           !Self.startsWithRuleMarker(text) {
+            return .strings([expanded])
+        }
 
         let (kind, body) = RuleSyntax.detectKind(expanded)
 
