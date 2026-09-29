@@ -418,7 +418,10 @@ extension JSEngine {
     static func cleanDecryptedString(_ data: Data) -> String {
         if data.isEmpty { return "" }
         if let text = String(data: data, encoding: .utf8) { return text }
-        if let text = String(data: data, encoding: .gb_18030_2000) { return text }
+        // GB18030 不能用 String.Encoding.gb_18030_2000：那个常量只在 macOS 上存在，
+        // iOS SDK 里没有，直接用会编译失败。统一走 Charset 的 CFString 转换。
+        if let gb = Charset.encoding(named: "gb18030"),
+           let text = String(data: data, encoding: gb) { return text }
         if let text = String(data: data, encoding: .isoLatin1) { return text }
         return ""
     }
