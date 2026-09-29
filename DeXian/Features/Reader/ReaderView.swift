@@ -67,8 +67,10 @@ struct ReaderView: View {
         // 命中判定落到浮层上，滚动直接被吃掉 ——
         // 这正是「点开小说页面无法上下滑动」的成因。
         // 拆开后浮层只剩上下两条，中间区域完全交还给正文。
-        .overlay(alignment: .top) { topChrome }
-        .overlay(alignment: .bottom) { bottomChrome }
+        // 视频全屏时由播放器接管整屏，外层浮层必须让位，
+        // 否则顶栏会横压在视频上、底栏会盖住进度条。
+        .overlay(alignment: .top) { if !videoIsFullScreen { topChrome } }
+        .overlay(alignment: .bottom) { if !videoIsFullScreen { bottomChrome } }
         .animation(.easeOut(duration: 0.2), value: showChrome)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
@@ -154,7 +156,7 @@ struct ReaderView: View {
     /// 中间 40% 收展工具条。
     private func handleTap(x: CGFloat, y: CGFloat) {
         // 听书与漫画都是连续滚动，误触翻章体验很差，只收展工具条
-        if isAudioSurface || viewModel.isComic {
+        if isAudioSurface || isVideoSurface || viewModel.isComic {
             withAnimation(.easeOut(duration: 0.2)) { showChrome.toggle() }
             return
         }
@@ -189,9 +191,15 @@ struct ReaderView: View {
     /// 音频源本身，或用户主动切到听书界面
     private var isAudioSurface: Bool { viewModel.isAudio || audioMode }
 
+    /// 影视 / 短剧源：整屏交给播放器，不参与文本排版
+    private var isVideoSurface: Bool { viewModel.isVideo }
+
+    /// 视频全屏中：外层浮层让位，整屏都给播放器
+    private var videoIsFullScreen: Bool { viewModel.isVideo && viewModel.isVideoFullScreen }
+
     /// 是否处于「整页翻页」阅读模式
     private var isPagedSurface: Bool {
-        !isAudioSurface && !viewModel.isComic && settings.pageTurn != .scroll
+        !isAudioSurface && !isVideoSurface && !viewModel.isComic && settings.pageTurn != .scroll
     }
 
     @ViewBuilder
@@ -208,7 +216,8 @@ struct ReaderView: View {
                 VStack { Spacer(); LoadingView(text: "正在获取目录"); Spacer() }
 
             case .failed(let message) where viewModel.content.isEmpty
-                && viewModel.images.isEmpty && viewModel.audioUrl.isEmpty:
+                && viewModel.images.isEmpty && viewModel.audioUrl.isEmpty
+                && viewModel.videoUrl.isEmpty:
                 EmptyStateView(
                     systemImage: "wifi.exclamationmark",
                     title: "加载失败",
@@ -223,7 +232,9 @@ struct ReaderView: View {
                 )
 
             default:
-                if isAudioSurface {
+                if isVideoSurface {
+                    VideoPlayerView(viewModel: viewModel)
+                } else if isAudioSurface {
                     AudioReaderView(viewModel: viewModel)
                 } else if viewModel.isComic {
                     ComicReaderView(
@@ -313,7 +324,8 @@ struct ReaderView: View {
                 showSettings = true
             } label: { Label("排版设置", systemImage: "textformat.size") }
 
-            if !viewModel.isAudio {
+            // 影视源没有正文，听书开关对它没有意义
+            if !viewModel.isAudio && !isVideoSurface {
                 Button {
                     audioMode.toggle()
                 } label: {
@@ -327,7 +339,7 @@ struct ReaderView: View {
                 Label(viewModel.cacheAllText,
                       systemImage: viewModel.isCachingAll ? "stop.circle" : "arrow.down.circle")
             }
-            .disabled(viewModel.chapters.isEmpty || viewModel.isAudio)
+            .disabled(viewModel.chapters.isEmpty || viewModel.isAudio || isVideoSurface)
 
             if viewModel.cachedChapterCount > 0 {
                 Button(role: .destructive) {

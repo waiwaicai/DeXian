@@ -1,11 +1,12 @@
 import Foundation
 
-/// 书源类型：0 文本，1 音频，2 图片(漫画)，3 文件
+/// 书源类型：0 文本，1 音频，2 图片(漫画)，3 文件，4 视频
 enum BookSourceType: Int, Codable, CaseIterable {
     case text = 0
     case audio = 1
     case image = 2
     case file = 3
+    case video = 4
 
     var displayName: String {
         switch self {
@@ -13,6 +14,7 @@ enum BookSourceType: Int, Codable, CaseIterable {
         case .audio: return "听书"
         case .image: return "漫画"
         case .file: return "文件"
+        case .video: return "影视"
         }
     }
 
@@ -22,6 +24,7 @@ enum BookSourceType: Int, Codable, CaseIterable {
         case .audio: return "waveform"
         case .image: return "photo.on.rectangle"
         case .file: return "doc.zipper"
+        case .video: return "play.rectangle"
         }
     }
 }

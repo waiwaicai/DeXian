@@ -17,6 +17,13 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var images: [String] = []
     /// 音频书源解析出的直链（听书用）
     @Published private(set) var audioUrl: String = ""
+    /// 视频书源（影视 / 短剧）解析出的直链
+    @Published private(set) var videoUrl: String = ""
+    /// 播放器是否处于全屏。
+    ///
+    /// 由播放器写入、阅读页读取：全屏时要让外层顶 / 底浮层让位，
+    /// 两个视图共享同一份状态，避免各自维护后不同步。
+    @Published var isVideoFullScreen = false
     @Published var currentIndex: Int = 0
     @Published private(set) var state: LoadState = .idle
     @Published private(set) var isLoadingContent = false
@@ -37,6 +44,8 @@ final class ReaderViewModel: ObservableObject {
     private var contentCacheOrder: [String] = []
     private let contentCacheLimit = 12
     private var loadTask: Task<Void, Never>?
+    /// 视频直链解析进行中标记，防止并发重复请求
+    private var isResolvingVideo = false
     private var cacheObserver: AnyCancellable?
 
     init(book: ShelfBook, source: BookSource?, shelf: ShelfStore) {
@@ -83,6 +92,9 @@ final class ReaderViewModel: ObservableObject {
     /// 是否音频（听书）书源
     var isAudio: Bool { book.type == .audio }
 
+    /// 是否影视 / 短剧书源
+    var isVideo: Bool { book.type == .video }
+
     /// 是否漫画模式
     var isComic: Bool {
         book.type == .image || (book.type == .text && !images.isEmpty && content.isEmpty)
@@ -123,6 +135,24 @@ final class ReaderViewModel: ObservableObject {
     ///
     /// 返回 true 表示已成功建立可读的单章，调用方不应再报错。
     private func fallbackToSingleChapter() async -> Bool {
+        // 影视源多数只有单集页面：目录失败就直接把书籍页当唯一一集。
+        // 这里不预取直链 —— 播放器拿到章节后会调 loadVideo()，
+        // 预取一次等于同一个页面被请求两遍。
+        if book.type == .video {
+            let candidate = (book.tocUrl ?? "").trimmed.isEmpty ? book.bookUrl : (book.tocUrl ?? "")
+            let target = candidate.trimmed
+            guard !target.isEmpty else { return false }
+            let chapter = BookChapter(url: target, title: book.name, index: 0,
+                                      isVip: false, updateTime: nil, tag: nil,
+                                      start: nil, end: nil, variable: nil)
+            chapters = [chapter]
+            currentIndex = 0
+            state = .loaded
+            shelf.updateChapters(bookId: book.id, chapters: chapters)
+            return true
+        }
+
+        // 漫画源整本一个阅读页：拿书籍页当唯一一章并立刻解析图片。
         guard book.type == .image else { return false }
         // 不要用 book.tocUrl! —— 这里是网络失败路径，
         // 在这种地方强制解包等于把「加载失败」升级成「闪退」。
@@ -157,6 +187,7 @@ final class ReaderViewModel: ObservableObject {
         content = ""
         images = []
         audioUrl = ""
+        videoUrl = ""
         await loadTocIfNeeded()
     }
 
@@ -187,6 +218,12 @@ final class ReaderViewModel: ObservableObject {
         // 音频书源没有正文，改为解析音频直链
         if book.type == .audio {
             await loadAudio()
+            return
+        }
+
+        // 影视 / 短剧书源同样没有正文，改为解析视频直链
+        if book.type == .video {
+            await loadVideo()
             return
         }
 
@@ -315,6 +352,48 @@ final class ReaderViewModel: ObservableObject {
             )
         } catch {
             audioUrl = ""
+            state = .failed(SourceError.describe(error))
+        }
+        isLoadingContent = false
+    }
+
+    /// 影视 / 短剧：解析当前章节的视频直链
+    func loadVideo() async {
+        // 去重：进入播放页时，阅读页的 .task 与播放器自己的 .task
+        // 会同时触发一次解析；引擎缓存要等首轮结束才写得上，
+        // 并发两轮就是同一个页面被请求两次。
+        guard !isResolvingVideo else { return }
+        isResolvingVideo = true
+        defer { isResolvingVideo = false }
+
+        guard let engine, let chapter = currentChapter else { return }
+        for (key, value) in book.variable { engine.variables[key] = value }
+        isLoadingContent = true
+        // 先清空，避免加载途中误播上一集
+        videoUrl = ""
+        do {
+            let url = try await engine.videoURL(
+                chapterUrl: chapter.url,
+                bookInfo: bookInfoMap,
+                chapterInfo: [
+                    "title": chapter.title,
+                    "url": chapter.url,
+                    "index": String(chapter.index),
+                    "bookUrl": book.bookUrl
+                ],
+                chapterTitle: chapter.title
+            )
+            videoUrl = url
+            state = .loaded
+            shelf.updateVariables(bookId: book.id, variables: engine.variableSnapshot)
+            shelf.updateProgress(
+                bookId: book.id,
+                chapterIndex: chapter.index,
+                chapterTitle: chapter.title,
+                offset: 0
+            )
+        } catch {
+            videoUrl = ""
             state = .failed(SourceError.describe(error))
         }
         isLoadingContent = false

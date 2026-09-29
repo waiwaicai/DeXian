@@ -2,6 +2,9 @@ import SwiftUI
 
 @main
 struct DeXianApp: App {
+    /// 接管方向锁：只有视频全屏时才允许横屏（见 DeXianAppDelegate）
+    @UIApplicationDelegateAdaptor(DeXianAppDelegate.self) private var appDelegate
+
     init() {
         // 最早时机安装崩溃捕获：越早越好，启动阶段的闪退也能留下现场。
         FileStorage.prepareDirectory()

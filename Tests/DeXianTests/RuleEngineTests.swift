@@ -849,6 +849,41 @@ final class RuleEngineTests: XCTestCase {
             type: .audio, tocUrl: nil, bookUrl: "https://a.com/audio/1"))
     }
 
+    // MARK: 影视 / 短剧源
+
+    /// 影视源同样普遍没有剧集目录，只要能拿到地址就该放行进播放器。
+    func testVideoCanOpenWithoutToc() {
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .video, tocUrl: nil, bookUrl: "https://a.com/dj/1"))
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .video, tocUrl: "https://a.com/dj/1", bookUrl: ""))
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .video, tocUrl: nil, bookUrl: "  "))
+    }
+
+    /// bookSourceType = 4 必须解析成影视，不能静默回退成文本源
+    ///（回退的后果是走进正文排版，把一个 m3u8 当小说渲染）。
+    func testVideoSourceTypeIsRecognised() {
+        let source = BookSource(dict: [
+            "bookSourceName": "测试影视",
+            "bookSourceUrl": "https://a.com",
+            "bookSourceType": 4
+        ])
+        XCTAssertEqual(source.type, .video)
+        XCTAssertEqual(BookType(rawValue: source.type.rawValue), .video)
+    }
+
+    /// 视频直链识别：覆盖 HLS 与常见封装，且不能把音频误判成视频。
+    func testVideoURLDetection() {
+        XCTAssertTrue(SourceEngine.isVideoURL("https://a.com/x.m3u8"))
+        XCTAssertTrue(SourceEngine.isVideoURL("https://a.com/x.mp4?token=1"))
+        XCTAssertTrue(SourceEngine.isVideoURL("HTTP://A.COM/X.MP4"))
+        XCTAssertTrue(SourceEngine.isVideoURL("https://a.com/x.flv"))
+        XCTAssertFalse(SourceEngine.isVideoURL("https://a.com/x.mp3"))
+        XCTAssertFalse(SourceEngine.isVideoURL("https://a.com/page.html"))
+        XCTAssertFalse(SourceEngine.isVideoURL(""))
+    }
+
     // MARK: 崩溃回归：JS 注入净化
     //
     // 症状：600 多个书源，搜到 97 个左右必闪退；崩溃栈是

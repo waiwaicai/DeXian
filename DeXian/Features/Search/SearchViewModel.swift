@@ -33,6 +33,7 @@ final class SearchViewModel: ObservableObject {
         case text = "小说"
         case comic = "漫画"
         case audio = "听书"
+        case video = "影视"
     }
 
     private var searchTask: Task<Void, Never>?
@@ -260,6 +261,7 @@ final class SearchViewModel: ObservableObject {
         case .text: scoped = list.filter { $0.type == .text }
         case .comic: scoped = list.filter { $0.type == .image }
         case .audio: scoped = list.filter { $0.type == .audio }
+        case .video: scoped = list.filter { $0.type == .video }
         }
         // 按书源 id 去重：占位结果与 ForEach 都用 sourceId 当 id，
         // 一旦重复，SwiftUI 会以 "Fatal error: Duplicate ID" 直接终止进程。

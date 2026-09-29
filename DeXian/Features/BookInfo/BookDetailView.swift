@@ -299,18 +299,21 @@ struct BookDetailView: View {
 
     /// 「开始阅读」按钮的文案：加载中 / 失败 / 可阅读 三态分明
     private var readingButtonTitle: String {
-        if !chapters.isEmpty { return "开始阅读" }
+        // 影视源没有「阅读」这个概念，用播放更贴合
+        let verb = searchBook.type == .video ? "开始播放" : "开始阅读"
+        if !chapters.isEmpty { return verb }
         if isLoading { return "正在获取目录" }
         // 漫画源普遍没有章节目录，整本就是一个阅读页。
         // 这类书源只要拿得到书籍地址就允许进入，由阅读器做单章兜底。
-        if canReadWithoutToc { return "开始阅读" }
+        if canReadWithoutToc { return verb }
         return "目录获取失败"
     }
 
     private var readingButtonIcon: String {
-        if !chapters.isEmpty { return "book.fill" }
-        if isLoading { return "book.fill" }
-        return canReadWithoutToc ? "book.fill" : "exclamationmark.triangle"
+        let ready = searchBook.type == .video ? "play.rectangle.fill" : "book.fill"
+        if !chapters.isEmpty { return ready }
+        if isLoading { return ready }
+        return canReadWithoutToc ? ready : "exclamationmark.triangle"
     }
 
     /// 漫画源是否可以在没有目录的情况下直接进入阅读。
@@ -337,7 +340,11 @@ struct BookDetailView: View {
     /// 旧版的闪退投诉里有一半是这一步被误导后反复重试造成的。
     private var chapterEmptyHint: String {
         if isLoading { return "正在获取目录…" }
-        if canReadWithoutToc { return "该漫画源无章节目录，直接点上方「开始阅读」即可" }
+        if canReadWithoutToc {
+            return searchBook.type == .video
+                ? "该影视源无剧集目录，直接点上方「开始播放」即可"
+                : "该漫画源无章节目录，直接点上方「开始阅读」即可"
+        }
         return errorMessage == nil ? "暂无章节信息" : "目录获取失败，请点上方「重试」"
     }
 

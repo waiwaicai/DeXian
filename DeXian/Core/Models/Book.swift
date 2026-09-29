@@ -5,6 +5,7 @@ enum BookType: Int, Codable {
     case audio = 1
     case image = 2
     case file = 3
+    case video = 4
 
     var displayName: String {
         switch self {
@@ -12,6 +13,7 @@ enum BookType: Int, Codable {
         case .audio: return "有声"
         case .image: return "漫画"
         case .file: return "文件"
+        case .video: return "影视"
         }
     }
 }
@@ -27,7 +29,9 @@ enum BookType: Int, Codable {
 /// 只对漫画放行：小说源目录失败时进去只会看到空白，反而更糟。
 enum ReaderEntryPolicy {
     static func canOpenWithoutToc(type: BookType, tocUrl: String?, bookUrl: String) -> Bool {
-        guard type == .image else { return false }
+        // 漫画与影视源都普遍没有目录：前者整本一个阅读页，
+        // 后者多数只有单集页面。都放行，进去由各自的解析器兜底。
+        guard type == .image || type == .video else { return false }
         let toc = (tocUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !toc.isEmpty { return true }
         return !bookUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

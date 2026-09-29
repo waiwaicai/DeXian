@@ -36,6 +36,13 @@ final class SourceEngine {
     private var audioCache: [String: String] = [:]
     private let audioLock = NSLock()
 
+    /// 视频书源解析出的直链缓存。
+    ///
+    /// 与音频分开持有：同一本书可能同时挂着音频源与影视源，
+    /// 共用一个字典会互相覆盖。
+    private var videoCache: [String: String] = [:]
+    private let videoLock = NSLock()
+
     /// 取页面 / 请求用的兜底 JS 引擎。
     ///
     /// 正常路径下调用方都会把自己已经建好的引擎传进来（见 fetchContent 的 js 参数），
@@ -398,12 +405,111 @@ final class SourceEngine {
         return first
     }
 
+    /// 影视 / 短剧：取出当前章节对应的视频直链。
+    ///
+    /// 结构与 audioURL 一致，只是扩展名集合不同：
+    /// 站点常见三种给法 ——
+    /// 1. 正文规则直接返回 m3u8 / mp4；
+    /// 2. 返回一段播放器代码（player_aaaa、data-ep-src 等），需要扫出链接；
+    /// 3. 只给一次解析结果，因此缓存复用。
+    ///
+    /// 与音频分开缓存：同一本书可能同时有音视频源，键相同会串台。
+    func videoURL(
+        chapterUrl: String,
+        bookInfo: [String: String] = [:],
+        chapterInfo: [String: String] = [:],
+        chapterTitle: String = ""
+    ) async throws -> String {
+        videoLock.lock()
+        if let cached = videoCache[chapterUrl], !cached.isEmpty {
+            videoLock.unlock()
+            return cached
+        }
+        videoLock.unlock()
+
+        let js = makeJSEngine(content: nil, bookInfo: bookInfo, chapterInfo: chapterInfo, title: chapterTitle)
+        let analyzer = makeAnalyzer(content: nil, baseUrl: chapterUrl, js: js)
+        var target = analyzer.interpolate(chapterUrl)
+        if target.hasPrefix("@js:") {
+            target = js.evaluateString(String(target.dropFirst(4)))
+        }
+
+        let parsed = HTTPClient.parseURLRule(target)
+        let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
+        js.host.baseUrl = parsed.url
+        let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
+
+        var candidates: [String] = []
+
+        // 正文规则的结果本身就是地址（短剧源最常见的写法）
+        let direct = contentAnalyzer.string(source.contentRule.content)
+        candidates.append(contentsOf: RuleUtil.extractURLs(direct).filter { Self.isVideoURL($0) })
+        candidates.append(contentsOf: videoLinks(in: direct, baseUrl: parsed.url))
+
+        // 规则没命中时，退回整页扫描
+        if candidates.isEmpty {
+            candidates.append(contentsOf: videoLinks(in: content, baseUrl: parsed.url))
+        }
+
+        // 兜底：JSON 形式返回的字段
+        if candidates.isEmpty {
+            for key in ["url", "src", "video", "playUrl", "play_url", "m3u8", "dplayer"] {
+                let value = contentAnalyzer.string("$." + key)
+                guard !value.isEmpty else { continue }
+                candidates.append(contentsOf: videoLinks(in: value, baseUrl: parsed.url))
+            }
+        }
+
+        guard let first = candidates.first(where: { !$0.isEmpty }) else {
+            throw SourceError.emptyContent
+        }
+        videoLock.lock()
+        videoCache[chapterUrl] = first
+        videoLock.unlock()
+        return first
+    }
+
+    /// 地址是否像视频（含 HLS 的 m3u8）。
+    static func isVideoURL(_ value: String) -> Bool {
+        let lowered = value.lowercased()
+        for ext in videoExtensions.split(separator: "|") {
+            if lowered.contains(".\(ext)") { return true }
+        }
+        return false
+    }
+
     /// 从文本中匹配常见音频链接
     private func audioLinks(in value: String, baseUrl: String) -> [String] {
+        mediaLinks(in: value, baseUrl: baseUrl, extensions: Self.audioExtensions)
+    }
+
+    /// 从文本中匹配常见视频链接
+    ///
+    /// 短剧 / 影视源（bookSourceType = 4）的正文规则普遍直接吐一个
+    /// m3u8 或 mp4 地址，也有把地址塞在 player_aaaa / data-src 里的写法，
+    /// 因此和音频一样按扩展名扫全文，而不依赖某一种固定字段。
+    private func videoLinks(in value: String, baseUrl: String) -> [String] {
+        mediaLinks(in: value, baseUrl: baseUrl, extensions: Self.videoExtensions)
+    }
+
+    private static let audioExtensions = "mp3|m4a|aac|ogg|flac|wav|ape|wma|m3u8"
+    /// m3u8 同时出现在两种列表里：HLS 既用于音频也用于视频，
+    /// 谁先匹配到取决于调用方传的扩展名集合。
+    private static let videoExtensions = "mp4|m3u8|flv|mkv|avi|mov|wmv|webm|ts|rmvb|m4v"
+
+    /// 按扩展名从任意文本里捞出媒体直链。
+    ///
+    /// 排除 `,` 与 `;`：JSON 里地址后常紧跟分隔符，
+    /// 把它们吞进地址会拼出 404 的链接。
+    private func mediaLinks(in value: String, baseUrl: String, extensions: String) -> [String] {
         guard !value.isEmpty else { return [] }
-        let pattern = "(?:https?:)?//[^\\s\"'<>\\,]+?\\.(?:mp3|m4a|aac|ogg|flac|wav|m3u8)"
+        let pattern = "(?:https?:)?//[^\\s\"'<>\\,;]+?\\.(?:" + extensions + ")(?:\\?[^\\s\"'<>\\,;]*)?"
         let matched = RuleUtil.regexMatch(value, pattern: pattern)
-        return matched.map { RuleUtil.absoluteURL($0, base: baseUrl) }
+        // 去重但保持出现顺序：同一地址在页面里往往被引用多次
+        var seen = Set<String>()
+        return matched
+            .map { RuleUtil.absoluteURL($0, base: baseUrl) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     /// 漫画：把章节内所有图片按顺序取出
