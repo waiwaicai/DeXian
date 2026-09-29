@@ -135,7 +135,6 @@ final class SourceEngine {
 
     func bookInfo(bookUrl: String, bookInfo: [String: String] = [:]) async throws -> BookInfo {
         let js = makeJSEngine(content: nil, bookInfo: bookInfo, chapterInfo: [:], title: "")
-        let analyzer = makeAnalyzer(content: nil, baseUrl: bookUrl, js: js)
 
         // 有些源详情页需要 POST 或 JS 生成 URL
         var target = bookUrl

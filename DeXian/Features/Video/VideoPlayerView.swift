@@ -350,12 +350,12 @@ struct VideoPlayerView: View {
                         get: { controller.duration > 0 ? controller.currentSeconds / controller.duration : 0 },
                         set: { ratio in controller.seek(to: ratio * controller.duration) }
                     ),
-                    in: 0...1
+                    in: 0...1,
+                    onEditingChanged: { editing in
+                        if editing { cancelHideControls() } else { scheduleHideControls() }
+                    }
                 )
                 .tint(.white)
-                .onEditingChanged { editing in
-                    if editing { cancelHideControls() } else { scheduleHideControls() }
-                }
 
                 HStack {
                     Text(controller.currentTimeText)
