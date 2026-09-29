@@ -600,9 +600,29 @@ final class AnalyzeRule {
             return chapterVariables[String(trimmed.dropFirst(8))] ?? ""
         }
         if let value = context.getVariable?(trimmed), !value.isEmpty { return value }
+
+        // {{...}} 里以 @ / $. / $[ / // 开头的是**规则**，不是 JavaScript。
+        //
+        // 这是 Legado 的既有约定（AnalyzeRule.isRule：js 首个字符不可能是 @，
+        // 所以 @ 开头一律当规则）。实测书源里有 {{@@h1@text}}、{{$.id}} 这类写法。
+        // 旧实现把这些整串丢给 JSEngine 求值，@ 在 JS 里是非法字符，
+        // 于是每个字段都报 SyntaxError: Invalid character: '@' 并退化成空串
+        // （用户看到的就是「内容分类里无显示」）。
+        if isRuleExpression(trimmed) {
+            return string(trimmed)
+        }
+
         if let value = context.evaluateJS?(trimmed, nil) {
             return RuleUtil.asString(value) ?? ""
         }
         return ""
+    }
+
+    /// {{}} 插值里的一段文本是不是「规则」（而不是 JS 表达式）。
+    ///
+    /// 与 Legado AnalyzeRule.isRule 保持一致：
+    /// @开头（含 @@ / @js: / @xpath: 等）、美元路径、// 开头的 XPath。
+    private func isRuleExpression(_ text: String) -> Bool {
+        text.hasPrefix("@") || text.hasPrefix("$.") || text.hasPrefix("$[") || text.hasPrefix("//")
     }
 }
