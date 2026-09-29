@@ -222,7 +222,7 @@ struct BookSource: Codable, Hashable, Identifiable {
         id = dict.str("bookSourceKey", "key", "id", "sourceId") ?? "\(nameValue)|\(urlValue)".stableHash
 
         name = nameValue
-        url = urlValue.trimmed
+        url = Self.stripURLAnnotation(urlValue)
         group = dict.str("bookSourceGroup", "group", "sourceGroup", "category") ?? ""
         type = BookSourceType(rawValue: dict.int("bookSourceType", "type", "sourceType") ?? 0) ?? .text
         enabled = dict.bool(true, "enabled", "enable")
@@ -242,13 +242,11 @@ struct BookSource: Codable, Hashable, Identifiable {
         variableComment = dict.str("variableComment", "variable_comment") ?? ""
         lastUpdateTime = dict.int("lastUpdateTime", "last_update_time", "updateTime") ?? 0
         respondTime = dict.int("respondTime", "respond_time", "timeout") ?? 180000
-        exploreUrl = Self.normalizeExploreUrl(dict.firstValue(["exploreUrl", "explore_url", "findUrl", "discoverUrl"]))
-        searchUrl = Self.jsonText(dict.firstValue(["searchUrl", "search_url", "ruleSearchUrl", "findUrl"])).trimmed
         cookieJar = dict.bool("enabledCookieJar", "cookieJar", "enableCookieJar")
 
         searchRule = SearchRule(dict: dict.dict("ruleSearch", "searchRule", "rule_search", "search") ?? [:])
-        exploreRule = ExploreRule(dict: dict.dict("ruleExplore", "exploreRule", "rule_explore", "explore") ?? [:])
-        bookInfoRule = BookInfoRule(dict: dict.dict("ruleBookInfo", "bookInfoRule", "rule_book_info", "bookInfo") ?? [:])
+        exploreUrl = Self.stripURLAnnotation(Self.normalizeExploreUrl(dict.firstValue(["exploreUrl", "explore_url", "findUrl", "discoverUrl"])))
+        searchUrl = Self.stripURLAnnotation(Self.jsonText(dict.firstValue(["searchUrl", "search_url", "ruleSearchUrl", "findUrl"])))
         tocRule = TocRule(dict: dict.dict("ruleToc", "tocRule", "rule_toc", "toc", "catalog") ?? [:])
         contentRule = ContentRule(dict: dict.dict("ruleContent", "contentRule", "rule_content", "content") ?? [:])
         ruleReview = dict.str("ruleReview", "reviewRule")
@@ -271,6 +269,13 @@ struct BookSource: Codable, Hashable, Identifiable {
             options.webView = true
         }
         return (parsed.url, options)
+    }
+
+    /// bookSourceUrl / searchUrl / exploreUrl 允许 `##注释` 后缀，必须剥离，否则会污染请求地址。
+    private static func stripURLAnnotation(_ value: String) -> String {
+        let raw = value.trimmed
+        guard let range = raw.range(of: "##") else { return raw }
+        return String(raw[..<range.lowerBound]).trimmed
     }
 
     private static func jsonText(_ any: Any?) -> String {
