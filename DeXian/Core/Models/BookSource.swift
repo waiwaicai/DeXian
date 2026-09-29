@@ -247,6 +247,8 @@ struct BookSource: Codable, Hashable, Identifiable {
         searchRule = SearchRule(dict: dict.dict("ruleSearch", "searchRule", "rule_search", "search") ?? [:])
         exploreUrl = Self.stripURLAnnotation(Self.normalizeExploreUrl(dict.firstValue(["exploreUrl", "explore_url", "findUrl", "discoverUrl"])))
         searchUrl = Self.stripURLAnnotation(Self.jsonText(dict.firstValue(["searchUrl", "search_url", "ruleSearchUrl", "findUrl"])))
+        exploreRule = ExploreRule(dict: dict.dict("ruleExplore", "exploreRule", "rule_explore", "explore") ?? [:])
+        bookInfoRule = BookInfoRule(dict: dict.dict("ruleBookInfo", "bookInfoRule", "rule_book_info", "bookInfo") ?? [:])
         tocRule = TocRule(dict: dict.dict("ruleToc", "tocRule", "rule_toc", "toc", "catalog") ?? [:])
         contentRule = ContentRule(dict: dict.dict("ruleContent", "contentRule", "rule_content", "content") ?? [:])
         ruleReview = dict.str("ruleReview", "reviewRule")
