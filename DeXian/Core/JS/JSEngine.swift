@@ -537,6 +537,34 @@ final class JSEngine {
         RuleUtil.asString(evaluate(script)) ?? ""
     }
 
+    /// 把规则求值器的「当前内容」转成 JS 全局 `src` 的字符串形态。
+    ///
+    /// 对齐 Legado：`bindings["src"] = content`，即**原样**把分析器的 content
+    /// 交给脚本。本工程的内容有四种形态，各按书源实际用法映射：
+    ///
+    /// - `String`：页面 HTML / JSON 文本，原样返回（`JSON.parse(src)` 用它）；
+    /// - `HTMLNode`：元素节点。Legado 里内容是 JSoup Element 时 `src` 是
+    ///   Element 对象，脚本一般走 `java.getString(rule, src)`。这里给
+    ///   **outerHTML** —— 既能被 `JSON.parse` 之外的字符串处理消费，
+    ///   也能被 `{@html ...}` 之外的解析复用；给 normalizedText 会丢掉标签，
+    ///   实测 `src.match(/href="([^"]+)"/)` 这类写法会整段落空。
+    /// - 容器 / 其余：JSON 文本。`datas[java.hexDecodeToString(src)]` 这类
+    ///   写法要求 src 是**纯字符串**，直接 String(describing:) 会带上
+    ///   Swift 的容器描述（含 `Optional(`），永远解不出来。
+    static func ruleContentString(_ content: Any?) -> String {
+        guard let content else { return "" }
+        if let text = content as? String { return text }
+        if let node = content as? HTMLNode { return node.outerHTML }
+        if let nodes = content as? [HTMLNode] { return nodes.map { $0.outerHTML }.joined() }
+        if let safe = RuleUtil.jsonSafeObject(content),
+           JSONSerialization.isValidJSONObject(safe),
+           let data = try? JSONSerialization.data(withJSONObject: safe, options: [.withoutEscapingSlashes]),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        return RuleUtil.asString(content) ?? ""
+    }
+
     /// 求值一次登录检查脚本：脚本里的 `result` 是**响应对象**。
     ///
     /// 对齐 Legado 的 `evalJS(loginCheckJs, strResponse)`。
@@ -738,19 +766,48 @@ final class JSEngine {
         }
         java.setObject(hmacHex, forKeyedSubscript: "HMacHex" as NSString)
 
-        let getString: @convention(block) (String, JSValue, Bool) -> String = { [weak self] rule, content, isURL in
+        // java.getString(rule[, content][, isUrl]) 与 java.getString(rule, unescape)。
+        //
+        // Legado 是**两个重载**（AnalyzeRule.kt:211 与 :217）：
+        //   getString(ruleStr, mContent = null, isUrl = false, unescape = true)
+        //   getString(ruleStr, unescape: Boolean)
+        // Rhino 按实参类型选：第二个参数是布尔就走 unescape，否则当 content。
+        // 全量语料实测 `java.getString(rule, false)` / `(rule, true)` 有 **2243 处**
+        // （晋江[细分] 等源的正文规则大量这么写）。旧实现一律把第二参数当
+        // content 传下去，内容变成一个布尔值，规则作用在非 HTML 值上恒取空 ——
+        // 表现就是「这类源的正文一个字都出不来」。
+        //
+        // unescape：Legado 默认 true，对结果做 HTML 实体反转义
+        // （StringEscapeUtils.unescapeHtml4）。src 里带 `&amp;` 的源文
+        // 不反转义就会把实体原样显示给用户 —— 即用户看到的「乱码/字符」。
+        let getString: @convention(block) (String, JSValue, JSValue) -> String = { [weak self] rule, second, third in
             guard let self else { return "" }
-            let target: Any? = (content.isUndefined || content.isNull) ? nil : JSEngine.swiftValue(content)
-            return self.host.resolveString?(rule, target, isURL) ?? ""
+            var target: Any?
+            var isURL = false
+            var unescape = true
+            if second.isBoolean {
+                unescape = second.toBool()
+            } else {
+                if !second.isUndefined, !second.isNull { target = JSEngine.swiftValue(second) }
+                if third.isBoolean { isURL = third.toBool() }
+            }
+            let value = self.host.resolveString?(rule, target, isURL) ?? ""
+            return unescape ? HTMLNode.decodeEntities(value) : value
         }
         java.setObject(getString, forKeyedSubscript: "getString" as NSString)
 
         // 返回值必须是「像 java.util.List 的对象」而不是裸 JS 数组：
         // 书源写 bs.size() / bs.get(i)，裸数组只有 .length 没有 .size()，
         // 一调用就抛 TypeError（日志里的 "bs.size is not a function"）。
-        let getStringList: @convention(block) (String, JSValue, Bool) -> JSValue = { [weak self] rule, content, isURL in
+        let getStringList: @convention(block) (String, JSValue, JSValue) -> JSValue = { [weak self] rule, content, third in
             guard let self, let context = self.context else { return JSValue() }
-            let target: Any? = (content.isUndefined || content.isNull) ? nil : JSEngine.swiftValue(content)
+            // 第二参数是布尔时说明调用方写了 unescape 形态的调用，
+            // 这里没有对应重载，按「未指定内容」处理，不能把布尔当内容。
+            var target: Any?
+            if !content.isBoolean, !content.isUndefined, !content.isNull {
+                target = JSEngine.swiftValue(content)
+            }
+            let isURL = third.isBoolean ? third.toBool() : false
             let values = self.host.resolveStringList?(rule, target, isURL) ?? []
             return JSEngine.makeListValue(values, in: context)
         }

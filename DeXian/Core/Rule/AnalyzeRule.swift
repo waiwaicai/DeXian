@@ -105,8 +105,18 @@ struct RuleContext {
     /// HTML 文档（惰性）
     var document: HTMLNode?
     var baseUrl: String?
-    /// JS 求值：参数为 (脚本, 前一步结果)，前一步结果对应 JS 里的 result 变量
-    var evaluateJS: ((String, Any?) -> Any?)?
+    /// JS 求值：参数为 (脚本, 前一步结果, 当前内容)。
+    ///
+    /// 第三个参数是**本次求值所在分析器的内容**，对齐 Legado 的
+    /// `AnalyzeRule.evalJS`：每次求值都要把 `content` 绑定成 JS 全局 `src`
+    /// （legado/AnalyzeRule.kt:721）。少了它，`java.hexDecodeToString(src)`
+    /// 这类「把当前页面当输入」的写法全部拿不到东西，实测订阅源里有 3732
+    /// 条规则在读 `src`（RSS 616「AI风月」的 ruleArticles 就是典型）。
+    ///
+    /// 必须是参数而不是引擎上的成员变量：`evaluateSegment` 会用
+    /// `context.replacingContent(...)` 派生一个换了内容的子分析器，而它**沿用同一个
+    /// 闭包**。写成成员变量时子分析器里的 JS 会读到外层的内容，链式规则整条错位。
+    var evaluateJS: ((String, Any?, Any?) -> Any?)?
     var getVariable: ((String) -> String?)?
     var putVariable: ((String, String?) -> Void)?
 
@@ -689,7 +699,9 @@ final class AnalyzeRule {
         if let previous {
             context.putVariable?("result", RuleUtil.asString(previous))
         }
-        return evaluate(script, previous)
+        // 把当前内容一并交出去当 JS 的 `src`：对齐 Legado 每次求值都
+        // `bindings["src"] = content`。见 RuleContext.evaluateJS 的说明。
+        return evaluate(script, previous, context.content)
     }
 
     /// 求值一段 JS，但**先展开脚本里的 `{{…}}` / `@get:{…}`**。
@@ -887,7 +899,7 @@ final class AnalyzeRule {
             return string(trimmed)
         }
 
-        if let value = context.evaluateJS?(trimmed, nil) {
+        if let value = context.evaluateJS?(trimmed, nil, context.content) {
             return RuleUtil.asString(value) ?? ""
         }
         return ""

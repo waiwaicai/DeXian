@@ -62,6 +62,18 @@ struct RssSource: Codable, Hashable, Identifiable {
     var ruleLink: String
     var ruleContent: String
 
+    /// 订阅源声明原样透传给脚本。
+    ///
+    /// 与 `BookSource.metaJSON` 同因同构：脚本直接读自己声明里的字段，
+    /// 全量语料实测订阅源侧有 `source.sourceIcon`（51 处）、
+    /// `source.sourceComment`（135 处）、`source.loginUrl`（64 处）、
+    /// `source.sortUrl`（17 处）等读取点。缺一个就是 undefined 参与运算 ——
+    /// 而 `source.sourceIcon` 尤其典型：RSS 616「AI风月」的 ruleArticles 写
+    /// `obj.img = source.sourceIcon`，图标取不到时整列文章封面全空。
+    ///
+    /// 可选类型：已落盘的旧订阅源没有这一列，非可选会让整份列表解码失败。
+    var metaJSON: String?
+
     init(dict: [String: Any]) {
         let urlValue = dict.str("sourceUrl", "url", "baseUrl", "host") ?? ""
         let nameValue = dict.str("sourceName", "name", "title") ?? "未命名订阅源"
@@ -111,6 +123,44 @@ struct RssSource: Codable, Hashable, Identifiable {
         ruleImage = dict.str("ruleImage") ?? ""
         ruleLink = dict.str("ruleLink") ?? ""
         ruleContent = dict.str("ruleContent") ?? ""
+        metaJSON = RssSource.scalarMeta(dict)
+    }
+
+    /// 抽出订阅源声明里的标量字段并序列化成 JSON 文本。
+    ///
+    /// 与书源侧同规则：只留标量，规则字典与超长内联脚本排除 ——
+    /// 后者体积是其余字段的上百倍，且已由 typed 属性承载。
+    private static func scalarMeta(_ dict: [String: Any]) -> String {
+        let excludedKeys: Set<String> = [
+            "ruleArticles", "ruleNextPage", "ruleTitle", "rulePubDate",
+            "ruleDescription", "ruleImage", "ruleLink", "ruleContent",
+            "jsLib", "injectJs", "preloadJs", "startJs", "startHtml",
+            "startStyle", "style", "sortUrl", "searchUrl"
+        ]
+        var output: [String: Any] = [:]
+        for (key, value) in dict {
+            if excludedKeys.contains(key) { continue }
+            if let text = value as? String {
+                if text.count > 8192 { continue }
+                output[key] = text
+            } else if let number = value as? NSNumber {
+                // 必须用 CFBooleanGetTypeID 区分真假布尔：JSON 解析出来的 `true`
+                // 是 __NSCFBoolean，同样是 NSNumber，当数字存会把 true/false
+                // 写成 1/0，源里 `=== true` 对不上；反过来时间戳若被当 Bool
+                // 就会变成 1。按类型 ID 判断两个方向都不会错。
+                if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                    output[key] = number.boolValue
+                } else {
+                    output[key] = number
+                }
+            } else if let flag = value as? Bool {
+                output[key] = flag
+            }
+        }
+        guard !output.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: output),
+              let text = String(data: data, encoding: .utf8) else { return "" }
+        return text
     }
 
     /// 是否配置了列表规则；没有时退化为直接罗列页面链接

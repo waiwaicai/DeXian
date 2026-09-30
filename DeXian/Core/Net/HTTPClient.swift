@@ -26,6 +26,10 @@ struct HTTPRequestOptions {
     var webView = false
     var retry: Int = 0
     var timeout: TimeInterval = 30
+    /// Legado 的 `{"type":...}`：响应体按**十六进制**文本给出。
+    ///
+    /// 见 `dataURIResponse`。只有 `data:` 地址上的 type 才有意义。
+    var type: String?
 }
 
 /// HTTP 客户端：处理 GBK 解码、Cookie 按书源隔离、自定义请求头。
@@ -64,6 +68,10 @@ final class HTTPClient {
         defaultHeaders: [String: String] = [:],
         base: String? = nil
     ) async throws -> HTTPResponse {
+        // data: URI 不发请求，直接解码（Legado getByteArrayIfDataUri 的等价物）
+        if let response = Self.dataURIResponse(urlString: urlString, options: options) {
+            return response
+        }
         let request = try Self.buildRequest(
             urlString: urlString,
             options: options,
@@ -240,6 +248,9 @@ final class HTTPClient {
         defaultHeaders: [String: String] = [:],
         base: String? = nil
     ) throws -> HTTPResponse {
+        if let response = Self.dataURIResponse(urlString: urlString, options: options) {
+            return response
+        }
         let request = try Self.buildRequest(
             urlString: urlString,
             options: options,
@@ -485,7 +496,44 @@ final class HTTPClient {
         if let proxy = dictionary.str("proxy") { options.proxy = proxy }
         if let webView = dictionary.firstValue(["webView", "webview"]) { options.webView = RuleUtil.asBool(webView) }
         if let retry = dictionary.int("retry") { options.retry = retry }
+        if let type = dictionary.str("type") { options.type = type }
         return options
+    }
+
+    /// `data:;base64,<payload>` 形式的地址：**不发网络请求**，直接解码当响应体。
+    ///
+    /// 对齐 Legado `AnalyzeUrl.getByteArrayIfDataUri()`：它在真正发请求之前
+    /// 先匹配 dataUriRegex，命中就 `Base64.decode(payload)` 当结果返回。
+    /// 携带 `{"type":...}` 选项时（`AnalyzeUrl.getStrResponseAwait`:
+    /// `if (type != null) return StrResponse(url, HexUtil.encodeHexStr(bytes))`）
+    /// 响应体是**十六进制文本**而不是原文 —— 书源里配套写的是
+    /// `java.hexDecodeToString(src)`。
+    ///
+    /// 为什么必须支持：实测 826 个书源 / 21 个订阅源把分类地址写成
+    /// `名称::data:;base64,MA==,{"type":0}`，payload 是**序号**（`MA==` = "0"）。
+    /// 旧实现把整串当真实 URL 去请求，URLSession 直接抛 unsupportedURL，
+    /// 表现是「这些源的分类一点就报错 / 列表永远空」。
+    /// RSS 616「AI风月」的路线切换就是这条路。
+    static func dataURIResponse(urlString: String, options: HTTPRequestOptions) -> HTTPResponse? {
+        let text = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("data:"), let comma = text.firstIndex(of: ",") else { return nil }
+        let header = String(text[text.startIndex..<comma])
+        // 只处理 base64；`data:text/plain,...` 这类本工程没有使用场景。
+        guard header.lowercased().contains("base64") else { return nil }
+        let payload = String(text[text.index(after: comma)...])
+        let bytes = Data(base64Encoded: payload, options: .ignoreUnknownCharacters) ?? Data()
+        // type 存在时给十六进制文本（书源据此走 hexDecodeToString）。
+        let body = options.type == nil
+            ? (String(data: bytes, encoding: .utf8) ?? "")
+            : bytes.map { String(format: "%02x", $0) }.joined()
+        return HTTPResponse(
+            data: bytes,
+            text: body,
+            headers: [:],
+            statusCode: 200,
+            finalURL: nil,
+            raw: nil
+        )
     }
 }
 

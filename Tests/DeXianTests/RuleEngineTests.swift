@@ -2192,7 +2192,7 @@ final class RssTests: XCTestCase {
         var context = RuleContext(content: nil, baseUrl: "https://a.com")
         context.getVariable = { variables[$0] ?? "" }
         context.putVariable = { name, value in variables[name] = value ?? "" }
-        context.evaluateJS = { script, _ in
+        context.evaluateJS = { script, _, _ in
             JSEngine(host: JSEngine.Host()).evaluate(script)
         }
         let analyzer = AnalyzeRule(context: context)
@@ -2214,7 +2214,7 @@ final class RssTests: XCTestCase {
         var context = RuleContext(content: nil, baseUrl: "https://a.com")
         context.getVariable = { variables[$0] ?? "" }
         context.putVariable = { name, value in variables[name] = value ?? "" }
-        context.evaluateJS = { script, _ in
+        context.evaluateJS = { script, _, _ in
             JSEngine(host: JSEngine.Host()).evaluate(script)
         }
         let analyzer = AnalyzeRule(context: context)
@@ -2968,6 +2968,97 @@ final class RssTests: XCTestCase {
         let engine = JSEngine(host: JSEngine.Host())
         XCTAssertEqual(engine.evaluateString("typeof book.order"), "number")
         XCTAssertEqual(engine.evaluateString("String(book.order)"), "0")
+    }
+
+    // MARK: 全局 src 绑定（Legado evalJS 语义）
+
+    /// 每次 JS 求值都要把「当前内容」绑成全局 `src`。
+    ///
+    /// Legado `AnalyzeRule.evalJS` 里是 `bindings["src"] = content`：
+    /// src 是**本次求值所在分析器的内容**，不是页面 HTML 的常驻副本。
+    /// 全量语料实测 3732 条订阅源规则读 src —— RSS 616「AI风月」的
+    /// `datas[java.hexDecodeToString(src)]` 就是靠它拿分类序号。
+    ///
+    /// 旧实现只在建引擎时设一次 src，规则求值时从不更新，于是：
+    /// 列表规则拿到的是初值、逐条字段规则拿到的还是页面内容，
+    /// `JSON.parse(src)` 一律崩。
+    func testSrcFollowsCurrentAnalysisContent() {
+        let js = JSEngine(host: JSEngine.Host())
+        let html = "<div id='c'>正文第一段</div>"
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        // 内容本身就是 HTML 文本时，src 必须是它（含标签，可被正则处理）
+        XCTAssertEqual(analyzer.string("@js: src.match(/正文(.*?)</)[1]"), "第一段")
+        XCTAssertEqual(analyzer.string("@js: src.slice(0, 5)"), "<div ")
+
+        // 换一个分析器（不同内容、同一个引擎）后 src 必须跟着换，
+        // 而不是停留在上一次的内容上
+        let other = SourceEngine.makeAnalyzer(
+            content: "{\"a\":7}", baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(other.string("@js: JSON.parse(src).a"), "7")
+    }
+
+    /// 内容是元素节点时，src 给 outerHTML（脚本会拿它做正则 / 二次解析）。
+    func testSrcIsOuterHTMLForElementContent() {
+        let js = JSEngine(host: JSEngine.Host())
+        let node = HTMLParser.parse("<a href='/b/9' class='x'>九</a>")
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: node, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(analyzer.string("@js: src.match(/href=\"([^\"]+)\"/)[1]"), "/b/9")
+    }
+
+    // MARK: data: URI 地址
+
+    /// `data:;base64,<payload>` 地址不发请求，且带 `{"type":…}` 时给十六进制。
+    ///
+    /// 对齐 Legado：`getByteArrayIfDataUri()` + `if (type != null)
+    /// return StrResponse(url, HexUtil.encodeHexStr(bytes))`。
+    /// 实测 826 个书源 / 21 个订阅源把分类地址写成这种形式
+    /// （`名称::data:;base64,MA==,{"type":0}`，payload 是分类序号）。
+    /// 旧实现当真实 URL 去请求 → unsupportedURL，这些源的分类恒为空。
+    func testDataURIAddressIsDecodedNotRequested() {
+        var options = HTTPRequestOptions()
+        options.type = "0"
+        let response = HTTPClient.dataURIResponse(urlString: "data:;base64,MA==", options: options)
+        XCTAssertNotNil(response)
+        // "0" 的十六进制是 30；书源配套写 java.hexDecodeToString(src) 解回 "0"
+        XCTAssertEqual(response?.text, "30")
+        XCTAssertEqual(response?.statusCode, 200)
+
+        // 没有 type 时给原文
+        let plain = HTTPClient.dataURIResponse(
+            urlString: "data:;base64,5L2g5aW9", options: HTTPRequestOptions()
+        )
+        XCTAssertEqual(plain?.text, "你好")
+
+        // 非 data: 地址一律不管，交回正常请求路径
+        XCTAssertNil(HTTPClient.dataURIResponse(
+            urlString: "https://a.com/x", options: HTTPRequestOptions()
+        ))
+    }
+
+    /// 订阅源的 `source.sourceIcon` 等声明字段要能被脚本读到（51 处用它取封面）。
+    func testRssSourceMetaIsExposedToScripts() {
+        let dict: [String: Any] = [
+            "sourceName": "测试订阅",
+            "sourceUrl": "https://a.com",
+            "sourceIcon": "https://a.com/i.png",
+            "sourceGroup": "AI创作",
+            "lastUpdateTime": 12345,
+            "ruleArticles": "@js: 1"
+        ]
+        let source = RssSource(dict: dict)
+        XCTAssertEqual(source.icon, "https://a.com/i.png")
+
+        let meta = source.metaJSON ?? ""
+        XCTAssertTrue(meta.contains("sourceIcon"), "sourceIcon 必须在 meta 里")
+        XCTAssertTrue(meta.contains("sourceGroup"))
+        XCTAssertTrue(meta.contains("12345"))
+        // 规则字典不进 meta
+        XCTAssertFalse(meta.contains("ruleArticles"))
     }
 
 }

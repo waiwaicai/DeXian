@@ -954,6 +954,9 @@ final class SourceEngine {
         var finalOptions = options
         finalOptions.method = options.method == "GET" && parsed.options.method != "GET" ? parsed.options.method : options.method
         if let body = parsed.options.body, options.body == nil { finalOptions.body = body }
+        // `{"type":…}` 必须跟着地址走：它是 `data:;base64` 地址的语义开关
+        // （响应体转十六进制），解析出来却不合并的话，书源自带的 type 会被丢掉。
+        if let type = parsed.options.type, finalOptions.type == nil { finalOptions.type = type }
         for (key, value) in parsed.options.headers where options.headers[key] == nil {
             finalOptions.headers[key] = value
         }
@@ -1168,8 +1171,14 @@ final class SourceEngine {
         chapterInfo: [String: String]
     ) -> AnalyzeRule {
         var context = RuleContext(content: content, baseUrl: baseUrl)
-        context.evaluateJS = { [weak js] script, previous in
+        context.evaluateJS = { [weak js] script, previous, current in
             if let previous { js?.result = previous } else { js?.result = content }
+            // 每次求值都重绑 src = 当前内容（对齐 Legado AnalyzeRule.evalJS）。
+            // 只在建引擎时设一次是不够的：同一个引擎会先跑列表规则、再逐条跑
+            // 每个元素的字段规则，元素内容与页面内容完全不同。订阅源里
+            // `java.hexDecodeToString(src)` / `JSON.parse(src)` 这类写法依赖它，
+            // 实测 3732 条规则读 src。
+            js?.src = JSEngine.ruleContentString(current)
             return js?.evaluate(script)
         }
         context.getVariable = { [weak js] name in
@@ -1179,6 +1188,46 @@ final class SourceEngine {
         }
         context.putVariable = { [weak js] name, value in
             js?.setVariable(name, value: value ?? "")
+        }
+        // java.getString(rule) / java.getStringList(rule) **单参数**必须落在
+        // 「当前正在求值的内容」上。
+        //
+        // Legado 的签名是 getString(ruleStr, mContent = null, isUrl = false)，
+        // 第二参数省略时取 `this.content`（当前 AnalyzeRule 的内容）。
+        // 旧实现只在 makeJSEngine 里注册一次、并且闭包捕获的是**建引擎时**的
+        // content（生产路径全都是 nil），于是单参数调用一律退化成
+        // `makeAnalyzer(content: nil)` → 空内容 → 恒返回空串。
+        //
+        // 全量语料实测：单参数 java.getString 有 48234 处、涉及 2143 个源，
+        // 多参数只有 5064 处 —— 也就是说绝大多数源的这类脚本一直在拿空值，
+        // 表现是「正文只显示几个字 / 详情字段整片空白」。单元测试
+        // testLeadingJSRuleStillReturnsContent 抓到的就是这条。
+        //
+        // 兜底顺序：显式 target → 本分析器的 content → 引擎当前的 src。
+        // 最后一级是给链式规则用的：evaluateSegment 派生的子分析器换了内容，
+        // 而 evaluateJS 会在求值前把 src 同步成那份新内容。
+        let analyzerContent = content
+        js.host.resolveString = { [weak js] rule, target, _ in
+            guard let js else { return "" }
+            guard let base = target ?? analyzerContent ?? (js.src.isEmpty ? nil : js.src) else { return "" }
+            return SourceEngine.makeAnalyzer(
+                content: base,
+                baseUrl: js.host.baseUrl,
+                js: js,
+                bookInfo: bookInfo,
+                chapterInfo: chapterInfo
+            ).string(rule)
+        }
+        js.host.resolveStringList = { [weak js] rule, target, _ in
+            guard let js else { return [] }
+            guard let base = target ?? analyzerContent ?? (js.src.isEmpty ? nil : js.src) else { return [] }
+            return SourceEngine.makeAnalyzer(
+                content: base,
+                baseUrl: js.host.baseUrl,
+                js: js,
+                bookInfo: bookInfo,
+                chapterInfo: chapterInfo
+            ).stringList(rule)
         }
         let analyzer = AnalyzeRule(context: context)
         analyzer.bookVariables = bookInfo

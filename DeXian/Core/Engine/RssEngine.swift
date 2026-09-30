@@ -235,8 +235,23 @@ final class RssEngine {
         host.sourceKey = source.id
         host.sourceName = source.name
         host.baseUrl = source.url
+        host.sourceUrl = source.url
+        host.sourceComment = source.comment
+        host.sourceHeader = source.header
+        host.loginUrl = source.loginUrl
         host.headers = headers
         host.document = content as? HTMLNode
+
+        // 订阅源声明原样透传：脚本直接读 source.sourceIcon（51 处）/
+        // source.sourceComment（135 处）/ source.sortUrl（17 处）等字段。
+        // 缺失时是 undefined，`obj.img = source.sourceIcon` 会把整列封面写成
+        // "undefined" 字符串。解析失败（旧数据没有这一列）时留空字典，
+        // 行为与改动前一致。
+        if let metaJSON = source.metaJSON, !metaJSON.isEmpty,
+           let data = metaJSON.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            host.sourceMeta = parsed
+        }
 
         let js = JSEngine(host: host)
         js.src = (content as? String) ?? ""

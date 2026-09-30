@@ -544,6 +544,20 @@ extension JSEngine {
         }
         java.setObject(logType, forKeyedSubscript: "logType" as NSString)
 
+        // java.vibrate(ms) / java.apk(...)：环境探针。
+        //
+        // 新版 5872 个订阅源里只有这两个 java.* 名字还没注册，且都是
+        // `if (typeof java !== 'undefined' && java.vibrate) { java.vibrate(ms); return; }`
+        // 这种**特性探测**写法 —— 缺失本身不报错，但探测失败会让脚本继续往下
+        // 去找 Android.* 分支，最终整段 return 不到预期位置。
+        // apk 的调用点更特殊：它出现在「蓝奏云盘」的说明文案里
+        // （…/release/leanback-java.apk【】…），只是被扫描器当成调用点，
+        // 注册成空实现即可，不影响任何逻辑。
+        let vibrate: @convention(block) (JSValue) -> Void = { _ in }
+        java.setObject(vibrate, forKeyedSubscript: "vibrate" as NSString)
+        let apk: @convention(block) (JSValue) -> Void = { _ in }
+        java.setObject(apk, forKeyedSubscript: "apk" as NSString)
+
         // java.putSharedData(key, value)：跨规则共享数据。
         let putSharedData: @convention(block) (JSValue, JSValue) -> Void = { [weak self] keyValue, valueValue in
             let key = JSEngine.stringFrom(keyValue)
