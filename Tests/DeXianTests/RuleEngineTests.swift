@@ -2990,7 +2990,9 @@ final class RssTests: XCTestCase {
         )
         // 内容本身就是 HTML 文本时，src 必须是它（含标签，可被正则处理）
         XCTAssertEqual(analyzer.string("@js: src.match(/正文(.*?)</)[1]"), "第一段")
-        XCTAssertEqual(analyzer.string("@js: src.slice(0, 5)"), "<div ")
+        // 注意 string() 会 trim 首尾空白，断言不要以空格结尾
+        XCTAssertEqual(analyzer.string("@js: src.slice(0, 4)"), "<div")
+        XCTAssertEqual(analyzer.string("@js: String(src.length)"), String(html.count))
 
         // 换一个分析器（不同内容、同一个引擎）后 src 必须跟着换，
         // 而不是停留在上一次的内容上
