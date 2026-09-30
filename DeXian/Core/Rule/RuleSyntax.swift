@@ -226,8 +226,17 @@ enum RuleSyntax {
         return nil
     }
 
-    /// 顶层分隔（双竖线 / 双与号）
-    static func splitTopLevel(_ text: String, separator: String) -> [String] {
+    /// 顶层分隔（双竖线「取首个非空」等）。
+    ///
+    /// `protectJavaScript` 打开时，`@js:` 之后的内容整段不参与分隔 ——
+    /// 只对规则分支（`||`）开启，见 `javascriptStart` 的说明。
+    /// 按行拆分替换规则（`separator: "\n"`）等调用必须关掉它，
+    /// 那里的 `\n` 是**数据分隔**，与 JS 无关。
+    static func splitTopLevel(
+        _ text: String,
+        separator: String,
+        protectJavaScript: Bool = false
+    ) -> [String] {
         let separatorCharacters = Array(separator)
         let characters = Array(text)
         var results: [String] = []
@@ -235,6 +244,21 @@ enum RuleSyntax {
         var depth = 0
         var quote: Character?
         var index = 0
+        // `@js:` 之后的部分是脚本，整段不参与分隔。
+        //
+        // `||` 是规则级的「取首个非空」，只适用于选择器/路径规则；
+        // 脚本里的 `||` 是**逻辑或**。实测有 26 条规则（15 个源）把整个
+        // 目录/封面计算写成一段 JS，脚本里自然带 `||`：
+        //     @js: … re==baseUrl&&/,/.test(book.bookUrl)?re+',{…}':re
+        //     @js: var chapters = json.data.chapters || []; …
+        // 一旦被切开，第一段是个**残缺脚本**，往往求值成 `false`
+        // （非空字符串！），于是 stringList 在第一段就命中返回，
+        // 真正的地址永远算不出来 —— 界面表现是目录地址/封面变成 "false"。
+        //
+        // 对齐 Legado：`splitSourceRule` 把 `@js:` 之后的全部内容当作
+        // 一个 Mode.Js 规则（AnalyzeRule.kt:453-454），`||` 只在 jsoup
+        // 分支（AnalyzeByJSoup.getStringList）里才拆分。
+        let scriptStart = protectJavaScript ? javascriptStart(characters) : nil
 
         while index < characters.count {
             let character = characters[index]
@@ -269,7 +293,9 @@ enum RuleSyntax {
                 index += 1
                 continue
             }
-            if depth == 0, matchesAt(characters, index, separatorCharacters) {
+            if depth == 0,
+               scriptStart == nil || index < scriptStart!,
+               matchesAt(characters, index, separatorCharacters) {
                 results.append(current)
                 current = ""
                 index += separatorCharacters.count
@@ -282,9 +308,61 @@ enum RuleSyntax {
         return results.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
+    /// 找出「顶层 `@js:`」的起始下标；没有就返回 nil。
+    ///
+    /// 只认引号之外、括号之外的 `@js:`，避免把字符串里的 `"@js:"` 误当成脚本起点。
+    private static func javascriptStart(_ characters: [Character]) -> Int? {
+        let marker: [Character] = Array("@js:")
+        var depth = 0
+        var quote: Character?
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            // `<js>…</js>` 是独立脚本块，块内的 `@js:` 不是链式起点。
+            if character == "<", let end = tagBlockEnd(characters, at: index, tag: "js") {
+                index = end + 1
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote { quote = nil }
+                index += 1
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                index += 1
+                continue
+            }
+            if character == "[" || character == "(" || character == "{" {
+                depth += 1
+                index += 1
+                continue
+            }
+            if character == "]" || character == ")" || character == "}" {
+                depth -= 1
+                index += 1
+                continue
+            }
+            if depth == 0, matchesAtIgnoringCase(characters, index, marker) {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
     private static func matchesAt(_ characters: [Character], _ index: Int, _ pattern: [Character]) -> Bool {
         guard index + pattern.count <= characters.count else { return false }
         for offset in 0..<pattern.count where characters[index + offset] != pattern[offset] { return false }
+        return true
+    }
+
+    /// 忽略 ASCII 大小写的 matchesAt（`@js:` / `@JS:` 都要认）。
+    private static func matchesAtIgnoringCase(_ characters: [Character], _ index: Int, _ pattern: [Character]) -> Bool {
+        guard index + pattern.count <= characters.count else { return false }
+        for offset in 0..<pattern.count where !sameCharacter(characters[index + offset], pattern[offset]) {
+            return false
+        }
         return true
     }
 

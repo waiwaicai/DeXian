@@ -167,7 +167,7 @@ final class AnalyzeRule {
 
     func stringList(_ rule: String?) -> [String] {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
+        for branch in RuleSyntax.splitTopLevel(rule, separator: "||", protectJavaScript: true) {
             let value = evaluateRule(branch, elements: false)
             // 正文抽取时保留段落：节点结果若直接拼接子文本，
             // <p>…</p><p>…</p> 会被压成一整行，阅读时排版全乱。
@@ -204,7 +204,7 @@ final class AnalyzeRule {
     /// extractImages 就再也找不到图片。节点结果保留 outerHTML。
     func htmlString(_ rule: String?) -> String {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
-        for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
+        for branch in RuleSyntax.splitTopLevel(rule, separator: "||", protectJavaScript: true) {
             let value = evaluateRule(branch, elements: false)
             switch value {
             case .nodes(let nodes):
@@ -224,7 +224,7 @@ final class AnalyzeRule {
     /// 列表规则（书籍列表 / 目录列表）：返回条目（HTMLNode 或 JSON 对象）。
     func listItems(_ rule: String?) -> [Any] {
         guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        for branch in RuleSyntax.splitTopLevel(rule, separator: "||") {
+        for branch in RuleSyntax.splitTopLevel(rule, separator: "||", protectJavaScript: true) {
             let items = evaluateListRule(branch)
             if !items.isEmpty { return items }
         }
@@ -281,6 +281,24 @@ final class AnalyzeRule {
         return false
     }
 
+    /// 规则的主体是不是一段 **JavaScript**。
+    ///
+    /// 上面那条「含 `{{…}}` 就当文本」的捷径对 `@js:` / `<js>` 必须让路，
+    /// 否则整段脚本会被当成一段普通字符串返回 —— 界面表现是
+    /// 「这个源的书 / 目录 / 正文是空的，或者直接显示了一段脚本原文」。
+    ///
+    /// 实测 3460 个源里有 111 条规则（57 个源）命中：
+    ///     @js: `../chapter?id={{$.id}}`  → 模板串里带插值
+    ///     <js> java.t2s(getString('text') || `{{book.name}}`) </js>
+    ///     @js: java.timeFormatUTC({{$.time}}, "yyyy-MM-dd", 0)
+    ///
+    /// 这些规则里的 `{{…}}` 是**给脚本用的值**，必须先替换成实际内容
+    /// 再交给 JS 求值（`expanded` 已经做过替换），而不是把整段原样吐出。
+    private static func startsWithJSMarker(_ text: String) -> Bool {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return value.hasPrefix("@js:") || value.hasPrefix("<js>")
+    }
+
     /// 求值规则；内嵌 <js>…</js> 段先跑，其结果作为后续规则的输入。
     private func evaluateChained(_ text: String, elements: Bool) -> RuleValue {
         let pieces = RuleSyntax.splitJSSegments(text)
@@ -295,7 +313,7 @@ final class AnalyzeRule {
         var value = RuleValue.strings([])
         for (isJS, piece) in pieces {
             if isJS {
-                let result = runJS(piece, previous: value.isEmpty ? nil : value.jsValue(elements: elements))
+                let result = runInterpolatedJS(piece, previous: value.isEmpty ? nil : value.jsValue(elements: elements))
                 value = .raw(result ?? "")
             } else {
                 value = evaluateSegment(piece, previous: value, elements: elements)
@@ -441,7 +459,8 @@ final class AnalyzeRule {
         //     $[?(@.chapter_name=="{{chapter.title}}")]
         // 展开后仍要按 JSON 路径求值，不能拍成文本。
         if (text.contains("{{") || text.lowercased().contains("@get:")),
-           !Self.startsWithRuleMarker(text) {
+           !Self.startsWithRuleMarker(text),
+           !Self.startsWithJSMarker(text) {
             return .strings([expanded])
         }
 
@@ -449,7 +468,9 @@ final class AnalyzeRule {
 
         switch kind {
         case .javascript:
-            let value = runJS(body)
+            // 走插值版：`<js>…{{book.name}}…</js>` 这类脚本里的模板记号
+            // 必须先替换成实际内容，否则会原样留在字符串里。
+            let value = runInterpolatedJS(body)
             return .raw(value ?? "")
 
         case .json:
@@ -510,18 +531,18 @@ final class AnalyzeRule {
 
         if lowered.hasPrefix("js:") {
             let script = String(text.dropFirst(3))
-            let result = runJS(script, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(script, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("@js:") {
             let script = String(text.dropFirst(4))
-            let result = runJS(script, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(script, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("<js>") {
             let (kind, body) = RuleSyntax.detectKind(text)
             guard kind == .javascript else { return value }
-            let result = runJS(body, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(body, previous: value.jsValue(elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("json:") {
@@ -617,6 +638,31 @@ final class AnalyzeRule {
             context.putVariable?("result", RuleUtil.asString(previous))
         }
         return evaluate(script, previous)
+    }
+
+    /// 求值一段 JS，但**先展开脚本里的 `{{…}}` / `@get:{…}`**。
+    ///
+    /// 书源大量把模板插值写在脚本内部，指望它先被替换成实际内容再求值：
+    ///
+    /// ```js
+    /// @js: `../chapter?id={{$.id}}&offset=0` + new Date().getTime()
+    /// <js> java.t2s(getString('text') || `{{book.name}}`) </js>
+    /// @js: java.timeFormatUTC({{$.time}}, "yyyy-MM-dd", 0)
+    /// ```
+    ///
+    /// 不展开就直接交给 JS 时，`{{…}}` 会被解析成**嵌套对象字面量**
+    /// （`{{a:1}}` 是合法的 JS 表达式），于是脚本不报错、但算出来的是
+    /// `[object Object]` 之类的垃圾 —— 比报错更难排查。
+    /// 实测 3460 个源里有 111 条规则（57 个源）这么写。
+    ///
+    /// `interpolate` 内部对 `{{}}` 与 `@get:{}` 都是文本替换，
+    /// 因此对脚本同样适用；替换后的字面量若含引号等字符，由书源自己负责转义
+    /// （Legado 的 makeUpRule 也是直接拼接文本，行为一致）。
+    private func runInterpolatedJS(_ script: String, previous: Any? = nil) -> Any? {
+        guard script.contains("{{") || script.lowercased().contains("@get:") else {
+            return runJS(script, previous: previous)
+        }
+        return runJS(interpolate(script), previous: previous)
     }
 
     // MARK: 正则

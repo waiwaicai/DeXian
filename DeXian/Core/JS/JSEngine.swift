@@ -180,8 +180,15 @@ final class JSEngine {
             // 而 `var` / 函数声明 / eval 出来的 helper 仍按 Annex B 提升到全局，
             // 书源依赖的 `eval(String(source.bookSourceComment))` 不受影响。
             var lastMessage = ""
-            let candidates = JSEngine.scriptCandidates(script)
-            for (index, candidate) in candidates.enumerated() {
+            var candidates = JSEngine.scriptCandidates(script)
+            // 归一化候选**惰性追加**：只有常规形态全部因语法错误失败后才计算。
+            // 惰性是有意的 —— 归一化要逐字符扫一遍脚本，而规则求值极其频繁
+            // （每个字段、每章都会跑），无条件预计算等于给每次求值都加一笔开销，
+            // 却对 99% 语法正确的脚本毫无用处。
+            var appendedNormalized = false
+            var index = 0
+            while index < candidates.count {
+                let candidate = candidates[index]
                 context.exception = nil
                 let value = context.evaluateScript(candidate)
                 guard let exception = context.exception else {
@@ -200,8 +207,23 @@ final class JSEngine {
                     // 只匹配前两种写法时，这条判定会失败并直接放弃，
                     // 于是「顶层 return」的脚本永远拿到空串。
                     || lastMessage.contains("Return statements are only valid inside functions")
-                if isSyntaxError, index + 1 < candidates.count { continue }
-                break
+                guard isSyntaxError else { break }
+                if index + 1 < candidates.count {
+                    index += 1
+                    continue
+                }
+                // 常规形态已用尽且仍报语法错误：改用归一化后的脚本再试一轮。
+                // 这一步修的是一类很集中的真实书源写法：
+                //     arr.map([title, b] => { … })
+                // Rhino 宽容，标准 JS 引擎（JSC / V8）直接报
+                // "Malformed arrow function parameter list"，整段脚本一行不执行。
+                // 实测新书源里 30 段脚本栽在这里，表现是那些源的发现页/目录全空。
+                if !appendedNormalized {
+                    appendedNormalized = true
+                    candidates.append(contentsOf: JSEngine.normalizedCandidates(script))
+                }
+                guard index + 1 < candidates.count else { break }
+                index += 1
             }
             if !lastMessage.isEmpty {
                 Log.debugLog("JS", "异常: " + lastMessage + " | 脚本: " + String(script.prefix(160)))
@@ -248,6 +270,21 @@ final class JSEngine {
         // 因此放到首位，省掉一次注定失败的求值。
         if hasTopLevelReturn(script) { return [wrapped, block] }
         return [block, wrapped]
+    }
+
+    /// 语法错误专用：把脚本归一化成标准写法后的候选形态。
+    ///
+    /// 只在 `evaluateOnQueue` 判定为**语法错误**且常规形态已用尽时才调用，
+    /// 正常情况下返回空数组（脚本无需改写），零额外开销。
+    ///
+    /// 目前归一化只做一件事：给箭头函数的裸解构参数补括号。
+    /// 详见 `ScriptNormalizer.normalizeArrowParameters`。
+    static func normalizedCandidates(_ script: String) -> [String] {
+        guard let normalized = ScriptNormalizer.normalizeArrowParameters(script) else {
+            return []
+        }
+        // 改写后的脚本沿用同样的两种包装，且保持「顶层 return」的优先级。
+        return scriptCandidates(normalized)
     }
 
     /// 脚本里是否存在「函数体之外」的 return。

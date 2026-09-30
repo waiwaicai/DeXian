@@ -202,6 +202,48 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(replacements[0].1, "")
     }
 
+    // MARK: `@js:` 脚本保护（`||` 不拆分）
+
+    /// `@js:` 之后的 `||` 是逻辑或，不能被当成规则分支切开。
+    ///
+    /// 有 26 条规则（15 个源）把整个目录/封面计算写成一段脚本，脚本里带 `||`。
+    /// 切开后第一段是残缺脚本，往往求值成 `false`（**非空字符串**），
+    /// `stringList` 于是在第一段就命中返回 —— 真正的地址永远算不出来，
+    /// 界面表现就是目录地址/封面变成 "false"。
+    func testJSRuleProtectsLogicalOrOperator() {
+        // 脚本里的 || 不切
+        let protected = RuleSyntax.splitTopLevel(
+            "@js: re==baseUrl&&/,/.test(book.bookUrl)?re:',':re || fallback",
+            separator: "||",
+            protectJavaScript: true
+        )
+        XCTAssertEqual(protected.count, 1)
+
+        // <js> 块之后的分支照常拆分
+        let afterTag = RuleSyntax.splitTopLevel(
+            "<js>GetList(result)</js> $.data||$..lists[*]",
+            separator: "||",
+            protectJavaScript: true
+        )
+        XCTAssertEqual(afterTag.count, 2)
+        XCTAssertTrue(afterTag[0].hasPrefix("<js>"))
+
+        // 普通选择器规则的候选分支必须先切
+        let plain = RuleSyntax.splitTopLevel("class.a@text||class.b@text", separator: "||", protectJavaScript: true)
+        XCTAssertEqual(plain.count, 2)
+    }
+
+    /// `@js:` 之前的部分仍按 `||` 拆分（`候选选择器@js:脚本`）。
+    func testJSRuleSplitsBranchesBeforeScript() {
+        let branches = RuleSyntax.splitTopLevel(
+            "class.a@text@js:result||'x'",
+            separator: "||",
+            protectJavaScript: true
+        )
+        XCTAssertEqual(branches.count, 1)
+        XCTAssertTrue(branches[0].hasSuffix("result||'x'"))
+    }
+
     // MARK: 规则求值（含链式与属性）
 
     func testAnalyzeRuleCSSChain() {
@@ -2135,6 +2177,50 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(analyzer.firstString("class.name@text"), "斗破苍穹")
     }
 
+    // MARK: JS 规则里的模板插值
+
+    /// `@js:` / `<js>` 规则里含 `{{…}}` 时，脚本必须照常求值。
+    ///
+    /// 「含 `{{}}` 就当文本」那条捷径是给 CSS/XPath 规则用的：模板替换完
+    /// 结果就是一段文本，不能再拿去做选择器。但 JS 规则不同 ——
+    /// `{{…}}` 是**喂给脚本的值**，脚本本身还得跑。
+    ///
+    /// 旧实现无条件把含 `{{}}` 的规则拍成文本，于是这类规则要么显示成
+    /// 一段脚本原文、要么整段落空。实测 3460 个源里 111 条规则（57 个源）命中。
+    func testJSRuleWithTemplateIsStillEvaluated() {
+        var variables: [String: String] = ["bid": "12345"]
+        var context = RuleContext(content: nil, baseUrl: "https://a.com")
+        context.getVariable = { variables[$0] ?? "" }
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        context.evaluateJS = { script, _ in
+            JSEngine(host: JSEngine.Host()).evaluate(script)
+        }
+        let analyzer = AnalyzeRule(context: context)
+
+        // `{{bid}}` 先替换成 12345，脚本再做字符串拼接
+        XCTAssertEqual(analyzer.string("@js: 'id=' + '{{bid}}'"), "id=12345")
+        // 插值出现在模板串内部（UAA禁漫 ruleToc.chapterUrl 的写法）
+        XCTAssertEqual(
+            analyzer.string("@js: `/c?force=false&id={{bid}}&offset=0`"),
+            "/c?force=false&id=12345&offset=0"
+        )
+        // 插值作为函数实参（飛天小說 ruleToc.updateTime 的写法）
+        XCTAssertEqual(analyzer.string("@js: 'T' + ({{bid}} + '').length"), "T5")
+    }
+
+    /// `<js>` 段内的插值同样要展开（可阅文学 ruleToc.chapterName 的写法）。
+    func testInlineJSSegmentExpandsTemplate() {
+        var variables: [String: String] = ["n": "斗破苍穹"]
+        var context = RuleContext(content: nil, baseUrl: "https://a.com")
+        context.getVariable = { variables[$0] ?? "" }
+        context.putVariable = { name, value in variables[name] = value ?? "" }
+        context.evaluateJS = { script, _ in
+            JSEngine(host: JSEngine.Host()).evaluate(script)
+        }
+        let analyzer = AnalyzeRule(context: context)
+        XCTAssertEqual(analyzer.string("<js>`书名:{{n}}`</js>"), "书名:斗破苍穹")
+    }
+
     // MARK: 列表规则给 JS 的 result 形态
 
     /// 列表规则里 result 必须是元素对象：书源会写 result.toArray() / result.select()。
@@ -2443,6 +2529,85 @@ final class RssTests: XCTestCase {
     func testParseURLRuleKeepsUnbalancedBraceComma() {
         let parsed = HTTPClient.parseURLRule("https://a.com/body,{未配平")
         XCTAssertEqual(parsed.url, "https://a.com/body,{未配平")
+    }
+
+    // MARK: 脚本归一化（箭头函数解构参数）
+
+    /// 裸的解构参数要能补上括号。
+    ///
+    /// 书源写成 `arr.map([title, b] => {…})`，Rhino 宽容，而标准 JS 引擎
+    /// （JavaScriptCore / V8）直接报 "Malformed arrow function parameter list"，
+    /// 整段脚本一行都不执行 —— 界面表现是发现页 / 目录全空。
+    /// 实测 id1263 的 1918 段脚本里有 30 段栽在这里。
+    func testScriptNormalizerAddsParensToBareDestructuring() {
+        XCTAssertEqual(
+            ScriptNormalizer.normalizeArrowParameters("arr.map([a,b]=>{ return a+b; })"),
+            "arr.map(([a,b])=>{ return a+b; })"
+        )
+        // 换行与空格不影响
+        XCTAssertEqual(
+            ScriptNormalizer.normalizeArrowParameters("arrb.map([title,b]=>\n\t\t\tarrc(title,a,b));"),
+            "arrb.map(([title,b])=>\n\t\t\tarrc(title,a,b));"
+        )
+        // 对象模式同样要补
+        XCTAssertEqual(
+            ScriptNormalizer.normalizeArrowParameters("arr.map({x,y}=>x)"),
+            "arr.map(({x,y})=>x)"
+        )
+        // 赋值形式（前面不是调用左括号）
+        XCTAssertEqual(
+            ScriptNormalizer.normalizeArrowParameters("f = [a,b]=>a+b;"),
+            "f = ([a,b])=>a+b;"
+        )
+        // 尾部悬空逗号
+        XCTAssertEqual(
+            ScriptNormalizer.normalizeArrowParameters("arr.map([a,]=>a)"),
+            "arr.map(([a,])=>a)"
+        )
+    }
+
+    /// 归一化不能误伤数组字面量、字符串与已经合法的写法。
+    ///
+    /// 逐字符扫描的改写最有价值也最危险：一旦把 `[1,2]` 这类
+    /// 数组字面量当成参数模式，会把本来能跑的脚本改成语法错误。
+    func testScriptNormalizerLeavesUnrelatedCodeAlone() {
+        // 已经合法的写法原样返回（无改动 → nil）
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("arr.map(([a,b])=>a+b)"))
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("f(([a,b])=>a)"))
+        // 数组字面量
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("var x = [1,2]; var y = a[0];"))
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("require([1,2])"))
+        // 下标访问后跟箭头（不是解构参数）
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("a[b] = c => d"))
+        // 字符串 / 注释里的内容不能被改
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("var s = 'map([a,b]=>x)';"))
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("// arr.map([a,b]=>a)"))
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("/* [a,b]=> */ 1"))
+        // 连续逗号不是合法的简单绑定模式，宁可放弃也不能乱改
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("arr.map([a,,b]=>a)"))
+        // 默认值 / rest 一律不碰（放宽匹配会误伤数组字面量）
+        XCTAssertNil(ScriptNormalizer.normalizeArrowParameters("arr.map([a=1]=>a)"))
+    }
+
+    /// 归一化候选只在常规形态都因语法错误失败后才追加。
+    func testNormalizedCandidatesOnlyForBareDestructuring() {
+        let bare = "arr.map([a,b]=>a+b);"
+        let normalized = JSEngine.normalizedCandidates(bare)
+        XCTAssertEqual(normalized.count, 2)
+        XCTAssertTrue(normalized[0].contains("([a,b])"))
+        // 本来就合法的脚本没有归一化形态
+        XCTAssertTrue(JSEngine.normalizedCandidates("var a = 1; a").isEmpty)
+    }
+
+    /// 端到端：裸解构参数的脚本必须能求值出结果，而不是静默返回空串。
+    func testBareDestructuringArrowActuallyEvaluates() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let script = """
+        var out = [];
+        [[1,2],[3,4]].map([a,b]=>{ out.push(a+b); });
+        out.join(',')
+        """
+        XCTAssertEqual(engine.evaluateString(script), "3,7")
     }
 
 }
