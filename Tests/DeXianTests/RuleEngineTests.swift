@@ -2629,6 +2629,7 @@ final class RssTests: XCTestCase {
         report += "evaluate(script) -> " + String(describing: direct) + "\n"
         report += "evaluate(normalized) -> " + String(describing: normal) + "\n"
         report += "JS log: " + Log.recent.filter { $0.category == "JS" }.map { $0.message }.joined(separator: " ;; ") + "\n"
+        report += "DIAG log: " + Log.recent.filter { $0.category == "DIAG" }.map { $0.message }.joined(separator: " ;; ") + "\n"
         XCTFail("DIAGNOSTIC >>> " + report)
     }
 

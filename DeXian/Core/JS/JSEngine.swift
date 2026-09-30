@@ -196,6 +196,7 @@ final class JSEngine {
                 }
                 lastMessage = exception.toString() ?? ""
                 context.exception = nil
+                Log.debugLog("DIAG", "iter index=" + String(index) + " count=" + String(candidates.count) + " msg=" + String(lastMessage.prefix(70)))
                 // 只有**语法错误**才允许换一种包装重试：语法错误阶段一行都没执行，
                 // 重试没有副作用。运行期异常可能已经发过网络请求，
                 // 再跑一次会把请求翻倍，必须直接放弃。
@@ -235,12 +236,15 @@ final class JSEngine {
                     // 归一化候选根本没机会执行，修复等于没生效。
                     let firstNormalized = candidates.count
                     let extra = JSEngine.normalizedCandidates(script)
+                    Log.debugLog("DIAG", "normalize extra=" + String(extra.count) + " firstNorm=" + String(firstNormalized) + " isSyntax=" + String(isSyntaxError))
                     if !extra.isEmpty {
                         candidates.append(contentsOf: extra)
                         index = firstNormalized
+                        Log.debugLog("DIAG", "appended -> index=" + String(index) + " count=" + String(candidates.count))
                         continue
                     }
                 }
+                Log.debugLog("DIAG", "break out of loop at index=" + String(index))
                 break
             }
             if !lastMessage.isEmpty {
