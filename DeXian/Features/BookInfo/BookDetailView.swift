@@ -299,8 +299,9 @@ struct BookDetailView: View {
 
     /// 「开始阅读」按钮的文案：加载中 / 失败 / 可阅读 三态分明
     private var readingButtonTitle: String {
-        // 影视源没有「阅读」这个概念，用播放更贴合
-        let verb = searchBook.type == .video ? "开始播放" : "开始阅读"
+        // 影视与听书源没有「阅读」这个概念，用播放更贴合
+        let verb = (searchBook.type == .video || searchBook.type == .audio)
+            ? "开始播放" : "开始阅读"
         if !chapters.isEmpty { return verb }
         if isLoading { return "正在获取目录" }
         // 漫画源普遍没有章节目录，整本就是一个阅读页。
@@ -310,7 +311,8 @@ struct BookDetailView: View {
     }
 
     private var readingButtonIcon: String {
-        let ready = searchBook.type == .video ? "play.rectangle.fill" : "book.fill"
+        let ready = (searchBook.type == .video || searchBook.type == .audio)
+            ? "play.rectangle.fill" : "book.fill"
         if !chapters.isEmpty { return ready }
         if isLoading { return ready }
         return canReadWithoutToc ? ready : "exclamationmark.triangle"
@@ -341,9 +343,11 @@ struct BookDetailView: View {
     private var chapterEmptyHint: String {
         if isLoading { return "正在获取目录…" }
         if canReadWithoutToc {
-            return searchBook.type == .video
-                ? "该影视源无剧集目录，直接点上方「开始播放」即可"
-                : "该漫画源无章节目录，直接点上方「开始阅读」即可"
+            switch searchBook.type {
+            case .video: return "该影视源无剧集目录，直接点上方「开始播放」即可"
+            case .audio: return "该听书源无章节目录，直接点上方「开始播放」即可"
+            default: return "该漫画源无章节目录，直接点上方「开始阅读」即可"
+            }
         }
         return errorMessage == nil ? "暂无章节信息" : "目录获取失败，请点上方「重试」"
     }

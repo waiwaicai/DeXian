@@ -77,8 +77,8 @@ struct VideoPlayerView: View {
                     infoArea
                     Spacer(minLength: 0)
                 }
-                .padding(.top, ReaderMetrics.topInset)
-                .padding(.bottom, ReaderMetrics.bottomInset)
+                .padding(.top, ReaderMetrics.videoTopInset)
+                .padding(.bottom, ReaderMetrics.videoBottomInset)
             }
         }
         .animation(.easeInOut(duration: 0.22), value: isFullScreen)

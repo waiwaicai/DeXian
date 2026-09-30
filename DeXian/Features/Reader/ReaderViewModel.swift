@@ -152,6 +152,26 @@ final class ReaderViewModel: ObservableObject {
             return true
         }
 
+        // 听书源同样多数没有目录：目录规则留空、整本只有一集播放页。
+        // 和影视一样不预取直链 —— AudioReaderView 拿到章节后会调
+        // loadAudio()，预取一次等于同一个页面被请求两遍。
+        //
+        // 没有这一支时，无目录的听书源会卡在「目录获取失败」，
+        // 用户点「开始阅读」按钮是灰的，表现就是「听书的源无法打开」。
+        if book.type == .audio {
+            let candidate = (book.tocUrl ?? "").trimmed.isEmpty ? book.bookUrl : (book.tocUrl ?? "")
+            let target = candidate.trimmed
+            guard !target.isEmpty else { return false }
+            let chapter = BookChapter(url: target, title: book.name, index: 0,
+                                      isVip: false, updateTime: nil, tag: nil,
+                                      start: nil, end: nil, variable: nil)
+            chapters = [chapter]
+            currentIndex = 0
+            state = .loaded
+            shelf.updateChapters(bookId: book.id, chapters: chapters)
+            return true
+        }
+
         // 漫画源整本一个阅读页：拿书籍页当唯一一章并立刻解析图片。
         guard book.type == .image else { return false }
         // 不要用 book.tocUrl! —— 这里是网络失败路径，

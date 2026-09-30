@@ -817,6 +817,22 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertFalse(store.showPageFooter)
     }
 
+    /// 正文预留的上下边距不能吃掉太多屏幕。
+    ///
+    /// 旧值 top 52 + bottom 92 = 144pt，叠加安全区后一屏 874pt 里
+    /// 有 262pt（30%）永远空白，用户看到的就是「排版没有铺满全屏」。
+    /// 工具条是浮层、会自动隐藏，正文不该按它的完整高度长期让位。
+    /// 这里把上限锁在整屏的 8% 以内，防止回退成大留白。
+    func testReaderInsetsLeaveMostOfTheScreenToText() {
+        let reserved = ReaderMetrics.topInset + ReaderMetrics.bottomInset
+        let screenHeight: CGFloat = 874
+        XCTAssertLessThanOrEqual(
+            reserved, screenHeight * 0.08,
+            "正文上下预留 " + String(Int(reserved)) + "pt，屏高 " + String(Int(screenHeight))
+                + "pt，占比超过 8%"
+        )
+    }
+
     // MARK: 漫画源入口（无目录也能进）
 
     /// 漫画源不提供目录是常态：整本就是一个阅读页。
@@ -845,11 +861,25 @@ final class RuleEngineTests: XCTestCase {
     func testTextSourceStillRequiresToc() {
         XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
             type: .text, tocUrl: nil, bookUrl: "https://a.com/book/1"))
-        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
-            type: .audio, tocUrl: nil, bookUrl: "https://a.com/audio/1"))
     }
 
     // MARK: 影视 / 短剧源
+
+    /// 听书源同样普遍没有目录：目录规则留空、整本只有一集播放页。
+    ///
+    /// 旧实现只放行漫画与影视，听书源因此永远卡在「目录获取失败」、
+    /// 按钮是灰的 —— 用户反馈的「听书的源无法打开」就是这条。
+    func testAudioCanOpenWithoutToc() {
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .audio, tocUrl: nil, bookUrl: "https://a.com/audio/1"))
+        XCTAssertTrue(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .audio, tocUrl: "https://a.com/audio/1", bookUrl: ""))
+        // 两个地址都拿不到时仍不能放行：进去只会是一张空白页
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .audio, tocUrl: nil, bookUrl: "   "))
+        XCTAssertFalse(ReaderEntryPolicy.canOpenWithoutToc(
+            type: .audio, tocUrl: "", bookUrl: ""))
+    }
 
     /// 影视源同样普遍没有剧集目录，只要能拿到地址就该放行进播放器。
     func testVideoCanOpenWithoutToc() {
