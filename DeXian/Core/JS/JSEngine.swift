@@ -792,7 +792,7 @@ final class JSEngine {
                 if third.isBoolean { isURL = third.toBool() }
             }
             let value = self.host.resolveString?(rule, target, isURL) ?? ""
-            return unescape ? HTMLNode.decodeEntities(value) : value
+            return unescape ? HTMLParser.decodeEntities(value) : value
         }
         java.setObject(getString, forKeyedSubscript: "getString" as NSString)
 
