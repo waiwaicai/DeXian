@@ -1749,7 +1749,9 @@ final class RssTests: XCTestCase {
 
             for (offset, page) in pages.enumerated() where offset < pages.count - 1 {
                 let used = Self.measure(page, font: layout.font,
-                                        lineSpacing: layout.lineSpacing, width: layout.width)
+                                        lineSpacing: layout.lineSpacing,
+                                        paragraphSpacing: layout.paragraphSpacing,
+                                        width: layout.width)
                 let unused = layout.height - used
                 XCTAssertLessThanOrEqual(
                     unused, lineHeight * 3,
@@ -1762,18 +1764,32 @@ final class RssTests: XCTestCase {
 
     /// 单行高度（含行距），用于把留白换算成行数
     private static func measuredLineHeight(_ layout: PageSplitter.Layout) -> CGFloat {
-        measure("得闲", font: layout.font, lineSpacing: layout.lineSpacing, width: layout.width)
+        // 单行不产生段落断点，段间距对它没有影响，传 0 即可
+        measure("得闲", font: layout.font, lineSpacing: layout.lineSpacing,
+                paragraphSpacing: 0, width: layout.width)
     }
 
-    /// 分页实测高度：与 PageSplitter 内部同一套度量
-    private static func measure(_ text: String, font: UIFont, lineSpacing: CGFloat, width: CGFloat) -> CGFloat {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = lineSpacing
-        paragraph.paragraphSpacing = 0
-        paragraph.lineBreakMode = .byWordWrapping
+    /// 分页实测高度：与 PageSplitter 内部同一套度量。
+    ///
+    /// 段落样式直接复用 `ReaderTextStyle`，与正文渲染 / 分页测量三方同源。
+    /// 各写一份的话，任何一方调了参数，这里的断言就会与实际排版脱节。
+    private static func measure(
+        _ text: String,
+        font: UIFont,
+        lineSpacing: CGFloat,
+        paragraphSpacing: CGFloat,
+        width: CGFloat
+    ) -> CGFloat {
         let attributed = NSAttributedString(
             string: text,
-            attributes: [.font: font, .paragraphStyle: paragraph]
+            attributes: [
+                .font: font,
+                .paragraphStyle: ReaderTextStyle.paragraphStyle(
+                    lineSpacing: lineSpacing,
+                    paragraphSpacing: paragraphSpacing,
+                    justified: true
+                )
+            ]
         )
         return ceil(attributed.boundingRect(
             with: CGSize(width: width, height: .greatestFiniteMagnitude),
@@ -2055,6 +2071,148 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("typeof java.get"), "function")
         XCTAssertEqual(engine.evaluateString("java.get('missing') === undefined || java.get('missing') === null ? 'empty' : 'value'"),
                        "empty")
+    }
+
+    // MARK: 正文排版
+
+    /// 中文正文必须两端对齐。
+    ///
+    /// 这是「放大后版面不居中、页面偏左、没有满屏铺开」的直接回归测试。
+    ///
+    /// SwiftUI 的 `Text` 没有对齐选项，右边界完全由断行决定。
+    /// 实测 402pt 宽的屏幕上，右边缘在 374pt 处就停住（余量 28~38pt 且参差不齐），
+    /// 而左边缘整齐地停在 21pt —— 视觉上就是「整体偏左、右边缺一块」。
+    /// 改走 TextKit 并设成 `.justified` 后，除段落末行外每一行都会顶到右边界。
+    func testReaderTextStyleIsJustified() {
+        let style = ReaderTextStyle.paragraphStyle(
+            lineSpacing: 8, paragraphSpacing: 10, justified: true
+        )
+        XCTAssertEqual(style.alignment, .justified, "中文正文必须两端对齐")
+        XCTAssertEqual(style.lineBreakMode, .byWordWrapping)
+        XCTAssertEqual(style.lineSpacing, 8)
+        XCTAssertEqual(style.paragraphSpacing, 10, "段落间距必须真实下发，否则设置调了没反应")
+        // 断词会把中文字符之间插上连字符
+        XCTAssertEqual(style.hyphenationFactor, 0)
+
+        // 关闭时退回自然对齐，不能强行套用两端对齐
+        let plain = ReaderTextStyle.paragraphStyle(
+            lineSpacing: 0, paragraphSpacing: 0, justified: false
+        )
+        XCTAssertEqual(plain.alignment, .natural)
+    }
+
+    /// 分页测量必须与正文渲染用同一份段落样式，并且默认两端对齐。
+    ///
+    /// 两处各写一份段落样式的话，任何一处改了参数，分页就会与绘制脱节，
+    /// 表现为「算得下一行、画出来被裁掉」或「每页底部空一大截」。
+    func testPageSplitterUsesJustifiedLayoutByDefault() {
+        let layout = PageSplitter.Layout(
+            font: UIFont.systemFont(ofSize: 18), lineSpacing: 6,
+            paragraphSpacing: 10, indent: false, height: 600, width: 320
+        )
+        XCTAssertTrue(layout.justified, "分页测量默认必须按两端对齐计算")
+    }
+
+    /// 段落间距必须真正影响分页结果。
+    ///
+    /// 旧实现把测量里的 `paragraphSpacing` 硬编码成 0（因为当时正文用
+    /// SwiftUI 的 `Text`，它不对 `\n` 应用段间距），于是翻页模式下
+    /// 「段落间距」这个设置调了完全没有效果。现在两侧都走 TextKit，
+    /// 段间距必须能改变一页装得下的内容量。
+    func testParagraphSpacingAffectsPagination() {
+        let paragraph = String(repeating: "得闲阅读排版测试。", count: 6)
+        let text = Array(repeating: paragraph, count: 40).joined(separator: "\n")
+        let base = PageSplitter.Layout(
+            font: UIFont.systemFont(ofSize: 18), lineSpacing: 4,
+            paragraphSpacing: 0, indent: false, height: 600, width: 320
+        )
+        let compact = PageSplitter.paginate(text: text, layout: base)
+        var spaced = base
+        spaced.paragraphSpacing = 30
+        let loose = PageSplitter.paginate(text: text, layout: spaced)
+        XCTAssertGreaterThan(loose.count, compact.count,
+                             "段间距变大后每页能放的内容变少，页数必须增加")
+    }
+
+    /// 分页与绘制必须拿到同一个 UIFont，否则「等宽」这类字体的行宽会不一致。
+    func testPageSplitterFontIsSharedWithRenderer() {
+        for family in SettingsStore.fontFamilies {
+            let font = PageSplitter.uiFont(family: family, size: 19)
+            XCTAssertEqual(font.pointSize, 19, "字体 \(family) 的字号必须与设置一致")
+        }
+    }
+
+    // MARK: 听书 / 影视直链
+
+    /// 目录规则直接给出媒体地址时必须原样返回，不能再去抓它。
+    ///
+    /// 喜马拉雅的 `ruleToc.chapterUrl` 写的是
+    /// `playPathAacv224||playPathAacv164||playUrl64||playUrl32`，
+    /// 解析出来**就是音频文件地址**。旧实现无条件请求它：
+    /// 把几十 MB 音频当 HTML 下载再从里面「提取音频链接」，
+    /// 必然一无所获 —— 这就是听书源一律打不开的直接原因。
+    func testDirectMediaDetectionForAudio() {
+        let audio = "mp3|m4a|aac|ogg|flac|wav|ape|wma|m3u8"
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://a.com/x.mp3", extensions: audio))
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://a.com/x.M4A", extensions: audio))
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://a.com/x.m3u8?auth=1", extensions: audio))
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://a.com/a/b/c.aac#t=1", extensions: audio))
+
+        // 网页不能误判成音频：query 里出现 .mp3 很常见
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("https://a.com/page?id=1.mp3", extensions: audio))
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("https://a.com/play?file=x.m3u8", extensions: audio))
+        // 相对地址不能当直链：播放器无法解析，必须先按章节页拼绝对地址
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("chapter/1.mp3", extensions: audio))
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("", extensions: audio))
+    }
+
+    /// 视频地址同理（短剧源的目录里常见直接写 m3u8 / mp4）。
+    func testDirectMediaDetectionForVideo() {
+        let video = "mp4|m3u8|flv|mkv|avi|mov|wmv|webm|ts|rmvb|m4v"
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://a.com/e/1.mp4", extensions: video))
+        XCTAssertTrue(SourceEngine.isDirectMediaURL("https://cdn.a.com/live/index.m3u8?t=9", extensions: video))
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("https://a.com/detail/1", extensions: video))
+        XCTAssertFalse(SourceEngine.isDirectMediaURL("https://a.com/x.mp3", extensions: video))
+    }
+
+    /// Content-Type 兜底：媒体字段常常不带扩展名。
+    func testMediaContentTypeDetection() {
+        XCTAssertTrue(SourceEngine.isMediaContentType("audio/mpeg"))
+        XCTAssertTrue(SourceEngine.isMediaContentType("audio/mp4; charset=utf-8"))
+        XCTAssertTrue(SourceEngine.isMediaContentType("video/mp4"))
+        XCTAssertTrue(SourceEngine.isMediaContentType("application/vnd.apple.mpegurl"))
+        XCTAssertTrue(SourceEngine.isMediaContentType("application/x-mpegURL"))
+        XCTAssertFalse(SourceEngine.isMediaContentType("text/html; charset=utf-8"))
+        XCTAssertFalse(SourceEngine.isMediaContentType("application/json"))
+        XCTAssertFalse(SourceEngine.isMediaContentType(nil))
+        XCTAssertFalse(SourceEngine.isMediaContentType(""))
+    }
+
+    // MARK: 全角引号容错
+
+    /// 书源里的全角引号必须能被还原。
+    ///
+    /// 实测有源写成 `href@js:result+',{webView:“true”}'`（全角引号），
+    /// JSON 解析必然失败，整条目录规则作废 ——
+    /// 界面表现就是「目录获取失败」（天天评书、恋听网吧等源如此）。
+    func testFullWidthJSONIsNormalized() {
+        let fixed = HTTPClient.normalizeFullWidthJSON("{\"webView\":“true”}")
+        XCTAssertEqual(fixed, "{\"webView\":\"true\"}")
+        XCTAssertNotNil(fixed.jsonObject as? [String: Any], "还原后必须能被 JSON 解析")
+
+        let chinese = HTTPClient.normalizeFullWidthJSON("{“method”：“POST”，“body”：｛｝}")
+        XCTAssertEqual(chinese, "{\"method\":\"POST\",\"body\":{}}")
+        XCTAssertNotNil(chinese.jsonObject as? [String: Any])
+
+        // 已经是合法 ASCII 的内容原样返回，不做无谓改写
+        XCTAssertEqual(HTTPClient.normalizeFullWidthJSON("{\"a\":1}"), "{\"a\":1}")
+    }
+
+    /// 夹带全角引号的 url 选项要能解析出选项，且地址部分保持干净。
+    func testParseURLRuleAcceptsFullWidthQuotes() {
+        let parsed = HTTPClient.parseURLRule("https://a.com/toc,{webView:“true”}")
+        XCTAssertEqual(parsed.url, "https://a.com/toc")
+        XCTAssertTrue(parsed.options.webView, "全角引号也要能识别出 webView")
     }
 
 }

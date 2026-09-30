@@ -370,6 +370,33 @@ final class SourceEngine {
         }
 
         let parsed = HTTPClient.parseURLRule(target)
+
+        // 目录规则有时直接给出音频直链（喜马拉雅就写
+        // `playPathAacv224||playPathAacv164||playUrl64||playUrl32`，
+        // 解析出来就是音频文件地址）。这种地址必须原样返回。
+        //
+        // 旧实现无条件去请求它：把几十 MB 的音频当 HTML 下载，
+        // 再从中「提取音频链接」—— 必然一无所获。
+        // 这正是听书源一律打不开的直接原因。
+        if Self.isDirectMediaURL(parsed.url, extensions: Self.audioExtensions) {
+            audioLock.lock()
+            audioCache[chapterUrl] = parsed.url
+            audioLock.unlock()
+            return parsed.url
+        }
+
+        // 扩展名没命中时再问一次 Content-Type。
+        //
+        // 站点的媒体字段常常不带扩展名（例如喜马拉雅的 playPath 值形如
+        // `https://aod.../xxx?auth=...`），只按扩展名判断会漏掉；
+        // 漏掉就会去下载几十 MB 的音频当 HTML 解析，必然失败。
+        if await isMediaResponse(urlString: parsed.url, options: parsed.options) {
+            audioLock.lock()
+            audioCache[chapterUrl] = parsed.url
+            audioLock.unlock()
+            return parsed.url
+        }
+
         let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
         js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
@@ -434,6 +461,24 @@ final class SourceEngine {
         }
 
         let parsed = HTTPClient.parseURLRule(target)
+
+        // 同 audioURL：目录规则直接给出 m3u8 / mp4 时不能再去抓它，
+        // 否则会把视频文件当 HTML 下载，再从中「提取视频链接」。
+        if Self.isDirectMediaURL(parsed.url, extensions: Self.videoExtensions) {
+            videoLock.lock()
+            videoCache[chapterUrl] = parsed.url
+            videoLock.unlock()
+            return parsed.url
+        }
+
+        // 同 audioURL：扩展名没命中时问一次 Content-Type
+        if await isMediaResponse(urlString: parsed.url, options: parsed.options) {
+            videoLock.lock()
+            videoCache[chapterUrl] = parsed.url
+            videoLock.unlock()
+            return parsed.url
+        }
+
         let content = try await fetchContent(urlString: parsed.url, options: parsed.options, page: 1, keyword: "", js: js)
         js.host.baseUrl = parsed.url
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
@@ -475,6 +520,73 @@ final class SourceEngine {
             if lowered.contains(".\(ext)") { return true }
         }
         return false
+    }
+
+    /// 地址本身是否就是媒体文件（按扩展名判定）。
+    ///
+    /// 不能用 `isVideoURL` 那种 `contains(".mp3")` 来判断能不能直接交给播放器：
+    /// `https://a.com/page?id=1.mp3` 明显是个网页，却也「包含 .mp3」。
+    /// 判错的后果是把网页当音频播出去，用户只会看到一直转圈。
+    ///
+    /// 规则：
+    /// - 必须是绝对地址（相对路径交给播放器无法解析，仍需按章节页拼接）；
+    /// - 去掉 query / fragment 后，路径必须以媒体扩展名结尾。
+    static func isDirectMediaURL(_ value: String, extensions: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lowered = trimmed.lowercased()
+        guard lowered.hasPrefix("http://") || lowered.hasPrefix("https://")
+            || lowered.hasPrefix("//") else { return false }
+
+        var path = trimmed
+        if let cut = path.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            path = String(path[..<cut])
+        }
+        let pathLowered = path.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        for ext in extensions.split(separator: "|") {
+            if pathLowered.hasSuffix("." + ext) { return true }
+        }
+        return false
+    }
+
+    /// 用 HEAD 探一次 Content-Type，判断这个地址是不是媒体文件。
+    ///
+    /// 只发 HEAD 不发 GET：地址是媒体时体积可能几十 MB，
+    /// 为了「判断类型」先下载一遍完全不可接受。
+    ///
+    /// 探不到结论（站点不支持 HEAD / 超时 / 网络错误）时一律返回 false，
+    /// 交给上层原有的解析流程 —— 这里只是多一次廉价的机会，
+    /// 不允许因为探测失败而把原本能解析的源弄坏。
+    private func isMediaResponse(urlString: String, options: HTTPRequestOptions) async -> Bool {
+        guard !urlString.isEmpty else { return false }
+        var probe = options
+        probe.method = "HEAD"
+        probe.body = nil
+        // 探测必须快：卡在慢站点上会把「打开章节」拖成几十秒
+        probe.timeout = 8
+        do {
+            let response = try await HTTPClient.shared.request(
+                urlString: urlString,
+                options: probe,
+                sourceKey: source.cookieJar ? source.id : nil,
+                defaultHeaders: headers,
+                base: baseForResolving(urlString, fallback: source.url)
+            )
+            return Self.isMediaContentType(response.header("Content-Type"))
+        } catch {
+            return false
+        }
+    }
+
+    /// Content-Type 是否指向音频 / 视频流。
+    static func isMediaContentType(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        let lowered = value.lowercased()
+        return lowered.hasPrefix("audio/")
+            || lowered.hasPrefix("video/")
+            // HLS 播放列表：Swift 的 AVPlayer 可直接播
+            || lowered.contains("mpegurl")
+            || lowered.contains("m3u")
     }
 
     /// 从文本中匹配常见音频链接

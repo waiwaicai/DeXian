@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 /// 我的：书源管理入口 + 阅读设置 + 关于
 struct SettingsView: View {
@@ -254,10 +255,35 @@ struct SettingsView: View {
 struct LogViewerView: View {
     @State private var entries: [Log.Entry] = []
     @State private var crash: String?
+    /// 复制 / 分享后的短暂提示：操作没有可见反馈时，
+    /// 用户会以为按钮没生效而反复点。
+    @State private var hint: String?
+    @State private var showShare = false
 
     var body: some View {
         List {
             crashSection
+
+            // 日志文本可长按选中，也可以整份复制 / 分享。
+            // 反馈问题时把日志贴出来，比截图强得多 ——
+            // 截图里的报错信息没法搜索、也贴不进聊天工具。
+            if !entries.isEmpty {
+                Section {
+                    Button {
+                        copyAll()
+                    } label: {
+                        Label("复制全部日志", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        showShare = true
+                    } label: {
+                        Label("分享日志文本", systemImage: "square.and.arrow.up")
+                    }
+                } footer: {
+                    Text("长按任意一条日志可单独复制。")
+                        .font(.themeTiny)
+                }
+            }
 
             if entries.isEmpty {
                 Text("暂无日志")
@@ -278,6 +304,9 @@ struct LogViewerView: View {
                         Text(entry.message)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(Theme.ColorToken.textSecondary)
+                            // 单条也能长按选中 / 拷贝
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.vertical, 2)
                 }
@@ -285,12 +314,35 @@ struct LogViewerView: View {
         }
         .navigationTitle("调试日志")
         .navigationBarTitleDisplayMode(.inline)
+        .overlay(alignment: .bottom) {
+            if let hint {
+                Text(hint)
+                    .font(.themeCaption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, Theme.Spacing.lg)
+                    .padding(.vertical, Theme.Spacing.sm)
+                    .background(Capsule().fill(Theme.Palette.brand.opacity(0.95)))
+                    .padding(.bottom, Theme.Spacing.xl)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: hint)
+        .sheet(isPresented: $showShare) {
+            ShareTextView(text: plainLogText)
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("刷新") { reload() }
-                Button("清空", role: .destructive) {
-                    Log.clear()
-                    reload()
+                Menu {
+                    Button("刷新") { reload() }
+                    Button("复制全部", action: copyAll)
+                    Button("分享", action: { showShare = true })
+                    Button("清空", role: .destructive) {
+                        Log.clear()
+                        reload()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
             }
         }
@@ -325,4 +377,57 @@ struct LogViewerView: View {
         entries = Log.recent.reversed()
         crash = CrashReporter.lastReport
     }
+
+    /// 日志的纯文本形态：时间 + 分类 + 正文，一行一条。
+    ///
+    /// 崩溃现场也带上 —— 排查闪退时它比日志本身更关键，
+    /// 只复制日志会让用户再去截图一次。
+    private var plainLogText: String {
+        var lines: [String] = []
+        lines.append("得闲 DeXian 调试日志")
+        lines.append("版本 " + Bundle.main.shortVersion)
+        lines.append("导出时间 " + Date().formatted(date: .numeric, time: .standard))
+        lines.append("")
+        for entry in entries.reversed() {
+            let time = entry.date.formatted(date: .omitted, time: .standard)
+            lines.append("[" + time + "] [" + entry.category + "] " + entry.message)
+        }
+        if let crash, !crash.isEmpty {
+            lines.append("")
+            lines.append("=== 上次闪退现场 ===")
+            lines.append(crash)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func copyAll() {
+        let text = plainLogText
+        guard !text.isEmpty else { return }
+        UIPasteboard.general.string = text
+        showHint(text.isEmpty ? "没有可复制的内容" : "已复制 " + String(text.count) + " 个字符")
+    }
+
+    private func showHint(_ text: String) {
+        hint = text
+        Task {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            if hint == text { hint = nil }
+        }
+    }
+}
+
+/// 系统分享面板：把日志文本发给微信 / 备忘录 / 邮件等。
+///
+/// 用 `UIActivityViewController` 而不是 SwiftUI 的 `ShareLink`：
+/// `ShareLink` 在 iOS 16 上对「纯文本 + 大段内容」的分享项
+/// 会走 `Transferable`，中文换行偶发被转义成可见的 `\n`。
+/// 这里直接交 NSString，行为与复制完全一致。
+struct ShareTextView: UIViewControllerRepresentable {
+    let text: String
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [text as NSString], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

@@ -17,10 +17,12 @@ enum PageSplitter {
         var lineSpacing: CGFloat
         /// 段落间距。
         ///
-        /// SwiftUI 的 `Text` 不会对 `\n` 应用 paragraphSpacing，
-        /// 但 `NSAttributedString` 会 —— 两者不一致会导致
-        /// 「算出来一页能放 20 行、实际只能画 17 行」，末行被裁掉。
-        /// 所以测量一律按 0 处理，段落层次靠段首缩进体现。
+        /// 正文与测量现在都走 TextKit（见 `ReaderTextView`），
+        /// `paragraphSpacing` 在两侧都会真实生效，因此这里直接采用设置值。
+        ///
+        /// 旧实现把测量固定成 0：那时正文是 SwiftUI 的 `Text`，
+        /// 它不对 `\n` 应用段间距，于是翻页模式下「段落间距」这个设置
+        /// 调了完全没有效果。改用 TextKit 后两侧一致，设置才真正生效。
         var paragraphSpacing: CGFloat
         /// 段首是否缩进两格
         var indent: Bool
@@ -28,6 +30,12 @@ enum PageSplitter {
         var height: CGFloat
         /// 一页可用宽度
         var width: CGFloat
+        /// 是否两端对齐。
+        ///
+        /// 必须参与测量：两端对齐会把行内字距拉开，断行位置与左对齐
+        /// 并不完全相同。测量与渲染用了不同的对齐方式，
+        /// 就会出现「算得下、画出来被裁」。
+        var justified: Bool = true
 
         var isValid: Bool { height > 40 && width > 40 }
     }
@@ -146,6 +154,10 @@ enum PageSplitter {
         layout: Layout
     ) -> CGFloat {
         guard !text.isEmpty else { return 0 }
+        // attributes 由 `attributes(for:)` 产出，其中的段落样式来自
+        // `ReaderTextStyle.paragraphStyle`，与正文渲染（`ReaderTextView`）
+        // 用的是同一份定义。量法与画法一致，才不会出现
+        // 「算得下、画出来被裁掉末行」。
         let attributed = NSAttributedString(string: text, attributes: attributes)
         let box = attributed.boundingRect(
             with: CGSize(width: layout.width, height: .greatestFiniteMagnitude),
@@ -155,13 +167,16 @@ enum PageSplitter {
         return ceil(box.height)
     }
 
-    /// 与 SwiftUI 正文一致的排版属性
+    /// 与正文渲染一致的排版属性。
+    ///
+    /// 直接复用 `ReaderTextStyle`，保证「量高度」和「画文字」
+    /// 用的是同一份段落样式 —— 这是分页准确性的前提。
     private static func attributes(for layout: Layout) -> [NSAttributedString.Key: Any] {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = layout.lineSpacing
-        // 与 SwiftUI Text 的行为对齐：\n 只按 lineSpacing 排，不加段间距
-        paragraph.paragraphSpacing = 0
-        paragraph.lineBreakMode = .byWordWrapping
+        let paragraph = ReaderTextStyle.paragraphStyle(
+            lineSpacing: layout.lineSpacing,
+            paragraphSpacing: layout.paragraphSpacing,
+            justified: layout.justified
+        )
         // 首行缩进与正文里的「　　」保持一致
         if layout.indent {
             paragraph.firstLineHeadIndent = layout.font.pointSize * 2

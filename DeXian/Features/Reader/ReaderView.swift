@@ -474,17 +474,23 @@ struct TextReaderView: View {
                     if viewModel.isLoadingContent, viewModel.content.isEmpty {
                         loadingIndicator
                     } else {
-                        // 逐段渲染：段落间距真实可控，长文排版更稳
-                        VStack(alignment: .leading, spacing: CGFloat(settings.paragraphSpacing)) {
-                            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
-                                Text(paragraph)
-                                    .font(settings.readingFont)
-                                    .lineSpacing(settings.lineSpacing)
-                                    .foregroundStyle(textColor)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .textSelection(.enabled)
+                        // 整章交给同一个 TextKit 视图渲染。
+                        //
+                        // 不用逐段 `Text` 拼 VStack：那样段落间距走的是
+                        // VStack 的 spacing，而两端对齐在 SwiftUI 里根本没有，
+                        // 右边界会参差不齐（实测右余量在 28~38pt 抖动），
+                        // 看起来就是「没铺满、整体偏左」。
+                        // TextKit 一次排版整章，段间距与两端对齐都真实生效，
+                        // 且与 PageSplitter 的度量同源。
+                        ReaderTextView(
+                            text: displayText,
+                            font: bodyFont,
+                            color: textUIColor,
+                            lineSpacing: CGFloat(settings.lineSpacing),
+                            paragraphSpacing: CGFloat(settings.paragraphSpacing),
+                            selectable: true,
+                            justified: true
+                        )
                         .id("content")
                     }
 
@@ -558,12 +564,29 @@ struct TextReaderView: View {
         .padding(.top, Theme.Spacing.xxl)
     }
 
-    /// 正文分段：空行丢弃，段首按设置决定是否缩进两格
-    private var paragraphs: [String] {
-        let text = ReaderTextFormatting.displayText(
-            viewModel.content, indent: settings.textIndent
-        )
-        return text.isEmpty ? [] : text.components(separatedBy: "\n")
+    /// 展示用正文：空行丢弃，段首按设置决定是否缩进两格
+    private var displayText: String {
+        ReaderTextFormatting.displayText(viewModel.content, indent: settings.textIndent)
+    }
+
+    /// 正文字体。
+    ///
+    /// 与翻页模式共用 `PageSplitter.uiFont`：两种模式必须拿同一个 UIFont，
+    /// 否则「等宽」这类字体在两种模式下度量不同，同一章换模式后行宽会变。
+    private var bodyFont: UIFont {
+        PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize)
+    }
+
+    private var textUIColor: UIColor {
+        UIColor(rgb: readerColorValue)
+    }
+
+    /// 当前生效的正文颜色值（与 ReaderView 的背景选择保持一致）
+    private var readerColorValue: UInt32 {
+        if settings.readerFollowsSystem {
+            return colorScheme == .dark ? 0xC9CDD4 : 0x2A2D33
+        }
+        return settings.readerTheme.textColor
     }
 
     /// 正文颜色：与 ReaderView 的背景选择保持一致
@@ -709,13 +732,19 @@ struct PagedReaderView: View {
             )
         } else {
             let current = pages.indices.contains(pageIndex) ? pages[pageIndex] : ""
-            Text(current)
-                // 刻意用与分页测量完全相同的 UIFont 转成 Font：
-                // 用 settings.readingFont 会因圆体等设计差异导致度量不一致，
-                // 每页末尾的字会被裁掉。
-                .font(Font(PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize)))
-                .lineSpacing(settings.lineSpacing)
-                .foregroundStyle(textColor)
+            // 与分页测量同源：同一个 UIFont、同一份段落样式（含两端对齐）。
+            // 用 SwiftUI 的 Text 会缺少两端对齐，且它与 PageSplitter 的
+            // TextKit 度量存在差异，每页末尾的字会被裁掉。
+            ReaderTextView(
+                text: current,
+                font: PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize),
+                color: UIColor(rgb: readerColorValue),
+                lineSpacing: CGFloat(settings.lineSpacing),
+                paragraphSpacing: CGFloat(settings.paragraphSpacing),
+                // 翻页模式禁用选中：长按选中会与左右轻点翻页抢手势
+                selectable: false,
+                justified: true
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 // .id 让每一页成为独立视图，转场才能按方向移动
                 .id(pageIndex)
@@ -865,6 +894,14 @@ struct PagedReaderView: View {
         } else {
             withAnimation(.easeInOut(duration: 0.28)) { change() }
         }
+    }
+
+    /// 当前生效的正文颜色值
+    private var readerColorValue: UInt32 {
+        if settings.readerFollowsSystem {
+            return colorScheme == .dark ? 0xC9CDD4 : 0x2A2D33
+        }
+        return settings.readerTheme.textColor
     }
 
     private var textColor: Color {
@@ -1086,12 +1123,6 @@ struct ReaderSettingsSheet: View {
             : Color(hex: settings.readerTheme.backgroundColor)
     }
 
-    private var previewText: Color {
-        settings.readerFollowsSystem
-            ? Theme.ColorToken.textPrimary
-            : Color(hex: settings.readerTheme.textColor)
-    }
-
     /// 预览用的示例段落。
     ///
     /// 刻意用两段：段落间距是「段与段之间」的距离，
@@ -1105,21 +1136,27 @@ struct ReaderSettingsSheet: View {
 
     /// 实时预览卡片。
     ///
-    /// 排版参数逐项复刻阅读页真实渲染（TextReaderView）：
-    /// 同一 UIFont、同一 lineSpacing、段落间距用 VStack spacing 表达。
-    /// 只有与真机渲染一致，预览才有参考价值 ——
-    /// 之前预览是单行文本、且只放在「字号」分组里，
-    /// 改行距 / 段距 / 字体时它纹丝不动。
+    /// 直接复用阅读页的渲染组件 `ReaderTextView`：同一个 UIFont、
+    /// 同一份段落样式、同样的两端对齐与段间距。
+    ///
+    /// 排版参数必须逐项与真机渲染对齐，预览才有参考价值 ——
+    /// 旧预览是 SwiftUI 的 `Text` 拼 VStack，既没有两端对齐，
+    /// 段间距也走的是 VStack spacing，与正文的 TextKit 排版并不一致：
+    /// 用户按预览调好样式，进正文看到的却是另一副样子。
+    /// （更早的版本预览还是单行文本，改行距 / 段距时它纹丝不动。）
     private var previewCard: some View {
-        VStack(alignment: .leading, spacing: CGFloat(settings.paragraphSpacing)) {
-            ForEach(Array(previewParagraphs.enumerated()), id: \.offset) { _, paragraph in
-                Text(settings.textIndent ? "　　" + paragraph : paragraph)
-                    .font(previewFont)
-                    .lineSpacing(settings.lineSpacing)
-                    .foregroundStyle(previewText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
+        ReaderTextView(
+            text: previewParagraphs
+                .map { settings.textIndent ? "　　" + $0 : $0 }
+                .joined(separator: "\n"),
+            font: previewUIFont,
+            color: previewTextUIColor,
+            lineSpacing: CGFloat(settings.lineSpacing),
+            paragraphSpacing: CGFloat(settings.paragraphSpacing),
+            selectable: false,
+            justified: true
+        )
+        .frame(minHeight: 72)
         .padding(Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
@@ -1131,6 +1168,8 @@ struct ReaderSettingsSheet: View {
         .animation(.easeOut(duration: 0.12), value: settings.fontSize)
         .animation(.easeOut(duration: 0.12), value: settings.lineSpacing)
         .animation(.easeOut(duration: 0.12), value: settings.paragraphSpacing)
+        .animation(.easeOut(duration: 0.12), value: settings.fontFamily)
+        .animation(.easeOut(duration: 0.12), value: settings.textIndent)
     }
 
     /// 预览字体必须与当前阅读模式的真实渲染字体完全一致。
@@ -1139,10 +1178,19 @@ struct ReaderSettingsSheet: View {
     /// `PageSplitter.uiFont`（保证分页测量与绘制同源）。
     /// 预览若固定用其中一种，「等宽」这类两种构造方式度量有差异的字体
     /// 就会看到与正文不一样的行宽和行高。
-    private var previewFont: Font {
-        settings.pageTurn == .scroll
-            ? settings.readingFont
-            : Font(PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize))
+    /// 预览字体与阅读页同源。
+    ///
+    /// 两种阅读模式现在统一用 `PageSplitter.uiFont`（TextKit 渲染），
+    /// 预览也必须用它，否则「等宽」这类字体在预览与正文里度量不同，
+    /// 用户会以为设置没生效。
+    private var previewUIFont: UIFont {
+        PageSplitter.uiFont(family: settings.fontFamily, size: settings.fontSize)
+    }
+
+    private var previewTextUIColor: UIColor {
+        settings.readerFollowsSystem
+            ? UIColor(rgb: 0x2A2D33)
+            : UIColor(rgb: settings.readerTheme.textColor)
     }
 
     /// 配色选项：左侧圆形色块 + 名称

@@ -290,13 +290,37 @@ final class HTTPClient {
 
         if let range = text.range(of: ",{") {
             let urlPart = String(text[..<range.lowerBound])
-            let optionPart = String(text[range.lowerBound...].dropFirst())
+            let optionPart = normalizeFullWidthJSON(String(text[range.lowerBound...].dropFirst()))
             if let dictionary = optionPart.jsonObject as? [String: Any] {
                 options = parseOptions(dictionary)
                 text = urlPart
             }
         }
         return (text.trimmingCharacters(in: .whitespacesAndNewlines), options)
+    }
+
+    /// 把书源里误用的全角引号 / 冒号还原成 ASCII。
+    ///
+    /// 实测有书源写成 `href@js:result+',{webView:“true”}'` —— 引号是全角
+    /// `“ ”`。这在 JSON 里是普通字符，解析必然失败，
+    /// 于是整条目录规则作废，界面表现就是「目录获取失败」（天天评书、
+    /// 恋听网吧等源就是这么写的）。
+    ///
+    /// 只替换出现在 `,{` 之后的这段选项文本：正文规则里的全角引号
+    /// 是内容的一部分，全局替换会把正文改坏。
+    static func normalizeFullWidthJSON(_ text: String) -> String {
+        guard text.contains("“") || text.contains("”") || text.contains("：") || text.contains("，") else {
+            return text
+        }
+        return text
+            .replacingOccurrences(of: "“", with: "\"")
+            .replacingOccurrences(of: "”", with: "\"")
+            .replacingOccurrences(of: "：", with: ":")
+            .replacingOccurrences(of: "，", with: ",")
+            .replacingOccurrences(of: "｛", with: "{")
+            .replacingOccurrences(of: "｝", with: "}")
+            .replacingOccurrences(of: "［", with: "[")
+            .replacingOccurrences(of: "］", with: "]")
     }
 
     static func parseOptions(_ dictionary: [String: Any]) -> HTTPRequestOptions {
