@@ -1385,13 +1385,21 @@ final class RssTests: XCTestCase {
     func testHTMLMetaCharsetLookupIsCaseInsensitiveAndSafe() {
         for declaration in ["<meta charset=\"gbk\">", "<meta CHARSET=\"GBK\">",
                             "<meta Charset=\"gb2312\">", "<META CHARSET=\"Gbk\">"] {
-            let html = "<html><head>" + declaration + "</head><body>正文</body></html>"
-            guard let data = html.data(using: .isoLatin1) else {
+            // 声明部分全是 ASCII，正文用 GBK 编码 —— 和真实 GBK 页面一致。
+            // 不能整段用 isoLatin1 编码，那样中文会编不出来。
+            guard let encoding = Charset.encoding(named: "gb18030"),
+                  let head = ("<html><head>" + declaration + "</head><body>").data(using: .isoLatin1),
+                  let body = "正文".data(using: encoding),
+                  let tail = "</body></html>".data(using: .isoLatin1) else {
                 XCTFail("构造失败")
                 continue
             }
+            var data = Data()
+            data.append(head)
+            data.append(body)
+            data.append(tail)
             let decoded = Charset.decode(data, preferred: nil)
-            XCTAssertFalse(decoded.isEmpty, declaration + " 不应解出空串")
+            XCTAssertTrue(decoded.contains("正文"), declaration + " 未按 GBK 解出正文： " + decoded)
         }
     }
 
