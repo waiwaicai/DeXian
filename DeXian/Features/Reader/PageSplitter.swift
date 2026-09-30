@@ -68,11 +68,17 @@ enum PageSplitter {
             // 而每行容纳的字符数随字号增大而减少，同样的比例在放大字号后
             // 丢掉的行数更多 —— 用户看到的「有些书字体放大以后没有铺满全屏、
             // 下方留一大片空」就是这个回退造成的。
-            // 现在最多回退 1.5 行（并额外限制在 12% 容量以内），
+            // 现在最多回退 3/4 行（并额外限制在 12% 容量以内），
             // 段落断点只在「相邻不远处」才作为优化生效。
+            //
+            // 为什么是 3/4 行而不是 1.5 行：回退窗口每多一行，每页就多空一行。
+            // 一页十几行时 1.5 行是 10% 的空白，字号放大到一页八九行时就变成
+            // 17% —— 用户放大量字体后看到的「下方空一大片」正是这个放大效应。
+            // 3/4 行既能盖住「上一行末尾刚好放不下一个字」的常见情形，
+            // 又把最坏留白压回半行以内。
             var cut = end
             let charactersPerLine = max(1, Int(layout.width / max(8, layout.font.pointSize)))
-            let backtrack = min(Int(Double(length) * 0.12), charactersPerLine + charactersPerLine / 2)
+            let backtrack = min(Int(Double(length) * 0.12), charactersPerLine * 3 / 4)
             let lowerBound = max(start, end - backtrack)
             if end < ns.length, lowerBound < end {
                 let searchRange = NSRange(location: lowerBound, length: end - lowerBound)

@@ -21,6 +21,7 @@ struct ExploreView: View {
             } else {
                 VStack(spacing: 0) {
                     sourcePicker
+                    if !viewModel.controls.isEmpty { formPanel }
                     if !viewModel.categories.isEmpty { categoryPicker }
                     bookList
                 }
@@ -34,6 +35,92 @@ struct ExploreView: View {
                 await viewModel.select(source: first)
             }
         }
+        .onAppear {
+            // 表单按钮要求搜索时：切到搜索页并立刻搜索
+            viewModel.requestSearch = { keyword in
+                appState.searchKeyword = keyword
+                appState.selectedTab = .search
+            }
+            viewModel.toast = { text in appState.show(text) }
+        }
+    }
+
+    // MARK: 表单控件
+
+    /// 表单型发现源（七猫 · API / 奈飞工厂 / 听小说APP / 吉站漫画 …）的
+    /// 下拉框与按钮。这些源的可选分类只有执行脚本才知道，
+    /// 所以控件必须能真的驱动一次求值。
+    private var formPanel: some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            // 文本输入：按钮脚本靠 infoMap['关键字'] 取词，
+            // 没有输入框的话「🔍搜索」永远提示「请输入关键字」。
+            ForEach(viewModel.textControls) { control in
+                TextField(control.title, text: Binding(
+                    get: { viewModel.controlValues[control.title] ?? "" },
+                    set: { viewModel.controlValues[control.title] = $0 }
+                ))
+                .font(.themeCallout)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, Theme.Spacing.md)
+                .padding(.vertical, Theme.Spacing.sm)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                        .fill(Theme.ColorToken.surface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                        .stroke(Theme.ColorToken.separator, lineWidth: 0.8)
+                )
+                .padding(.horizontal, Theme.Spacing.page)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    ForEach(viewModel.actionControls) { control in
+                        if control.isButton {
+                            Button {
+                                Task { await viewModel.perform(control: control) }
+                            } label: {
+                                Text(control.title)
+                                    .font(.themeCaption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, Theme.Spacing.md)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        Capsule().fill(Theme.Palette.accent)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        } else if control.isSelect, !control.chars.isEmpty {
+                            Menu {
+                                ForEach(control.chars, id: \.self) { option in
+                                    Button(option) {
+                                        Task { await viewModel.perform(control: control, value: option) }
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(control.title + "：" + (viewModel.controlValues[control.title] ?? ""))
+                                        .font(.themeCaption)
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundStyle(Theme.Palette.brand)
+                                .padding(.horizontal, Theme.Spacing.md)
+                                .padding(.vertical, 7)
+                                .background(
+                                    Capsule().fill(Theme.Palette.brand.opacity(0.13))
+                                )
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.page)
+            }
+            .frame(height: 34)
+        }
+        .padding(.bottom, Theme.Spacing.sm)
     }
 
     // MARK: 书源选择
@@ -157,6 +244,10 @@ struct ExploreView: View {
 final class ExploreViewModel: ObservableObject {
 
     @Published private(set) var categories: [ExploreCategory] = []
+    /// 表单型发现源（七猫 · API / 奈飞工厂 / 听小说APP …）的下拉框与按钮。
+    @Published private(set) var controls: [ExploreFormItem] = []
+    /// 控件当前选中的值（title -> 值），提交按钮时按名字取回
+    @Published var controlValues: [String: String] = [:]
     @Published private(set) var books: [SearchBook] = []
     @Published private(set) var isLoading = false
     @Published var errorMessage: String?
@@ -167,21 +258,71 @@ final class ExploreViewModel: ObservableObject {
     private var currentCategory: ExploreCategory?
     private var page = 1
     private var isFinished = false
+    /// 是否正在重新求值「发现配置」（防止脚本回调造成递归）
+    private var isReloading = false
+    /// 是否已经为当前源做过「提交控件默认值」引导（每个源只做一次）
+    private var didBootstrap = false
+
+    /// 表单按钮要求「搜索这本书」时，把关键词交给外层切到搜索页
+    var requestSearch: ((String) -> Void)?
+    /// 表单脚本的 java.toast 提示
+    var toast: ((String) -> Void)?
+
+    /// 需要输入框的控件（type = text）
+    var textControls: [ExploreFormItem] {
+        controls.filter { !$0.isButton && !$0.isSelect }
+    }
+    /// 按钮与下拉框
+    var actionControls: [ExploreFormItem] {
+        controls.filter { $0.isButton || $0.isSelect }
+    }
+
+    /// 执行某个表单控件的 action（按钮点击 / 下拉框变化）。
+    ///
+    /// 脚本里会读 `infoMap['控件名']` 拿到用户当前选的值，因此先把
+    /// controlValues 灌进 infoMap，再跑 action；action 里若调用
+    /// java.refreshExplore()，会经由引擎回调触发 refreshFromForm()。
+    func perform(control: ExploreFormItem, value: String? = nil) async {
+        guard let source else { return }
+        if let value { controlValues[control.title] = value }
+        guard let action = control.action, !action.trimmed.isEmpty else {
+            // 没有 action 的下拉框：只更新选中值，等用户点提交按钮
+            return
+        }
+        let engine = SourceEngine(source: source)
+        engine.onRefreshExplore = { [weak self] in
+            Task { @MainActor in await self?.refreshFromForm() }
+        }
+        engine.onSearchBook = { [weak self] keyword in
+            Task { @MainActor in self?.requestSearch?(keyword) }
+        }
+        engine.onToast = { [weak self] text in
+            Task { @MainActor in self?.toast?(text) }
+        }
+        // action 执行前把控件值写进 infoMap（脚本全部通过它读值）
+        let values = controlValues
+        await Background.run {
+            _ = engine.evaluateFormAction(action, values: values)
+        }
+    }
+
+    /// 表单要求刷新：重新求值发现配置，但保留用户已选的值。
+    func refreshFromForm() async {
+        // 防重入：脚本在求值期里再次触发 refreshExplore 时，
+        // 无限递归会把发现页卡死。
+        guard !isReloading else { return }
+        let saved = controlValues
+        await reloadCategories()
+        for (key, value) in saved where controlValues[key] != nil {
+            controlValues[key] = value
+        }
+    }
 
     func select(source: BookSource) async {
         self.source = source
         selectedSourceId = source.id
-        var parsed = parseCategories(source.exploreUrl)
-        // 有些书源的发现地址是单条 URL（不是「分类名::地址」列表），
-        // 解析不出分类时兜底成一个「全部」入口，否则整页什么都点不动。
-        let raw = source.exploreUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        if parsed.isEmpty, !raw.isEmpty, !raw.hasPrefix("[") {
-            parsed = [ExploreCategory(dict: ["title": "全部", "url": raw])]
-        }
-        // 分类去重：上报的书源里同一分类偶尔重复出现，
-        // SwiftUI 的 ForEach 遇到重复 id 会直接 fatalError 崩溃。
-        var seenCategory = Set<String>()
-        categories = parsed.filter { seenCategory.insert($0.id).inserted }
+        didBootstrap = false
+        await reloadCategories()
         books = []
         errorMessage = nil
         isFinished = false
@@ -190,6 +331,73 @@ final class ExploreViewModel: ObservableObject {
         if let first = categories.first {
             await select(category: first)
         }
+    }
+
+    /// 重新求值「发现配置」（分类 + 表单控件）。
+    ///
+    /// 脚本型 exploreUrl 必须在这里执行：表单控件的默认值、以及「切换频道」
+    /// 之后的新分类列表都由脚本现算。旧实现只做纯文本解析，
+    /// 这类源在发现页只能是空白。
+    func reloadCategories() async {
+        guard let source else { return }
+        guard !isReloading else { return }
+        isReloading = true
+        defer { isReloading = false }
+
+        await evaluateConfig(source: source)
+
+        // 一次引导：少数源的分类要等控件默认值先提交才会产生。
+        //
+        // 米读小说的 exploreUrl 只先吐出「频道」下拉框，分类列表是在
+        // 频道切换的 action 里（java.refreshExplore）才生成的；
+        // 终极全栖接口聚合同理，要先确定用哪个接口。
+        // 不做这一步的话，用户切到这些源只会看到一片空白。
+        if categories.isEmpty, !didBootstrap, !controls.isEmpty {
+            didBootstrap = true
+            if let seed = controls.first(where: {
+                !$0.isButton && !($0.action ?? "").trimmed.isEmpty
+            }) {
+                await perform(control: seed, value: controlValues[seed.title])
+                didBootstrap = true
+                await evaluateConfig(source: source)
+            }
+        }
+    }
+
+    /// 求值一次「发现配置」，写回 categories / controls / controlValues。
+    private func evaluateConfig(source: BookSource) async {
+        let engine = SourceEngine(source: source)
+        engine.onRefreshExplore = { [weak self] in
+            Task { @MainActor in await self?.refreshFromForm() }
+        }
+        engine.onSearchBook = { [weak self] keyword in
+            Task { @MainActor in self?.requestSearch?(keyword) }
+        }
+        engine.onToast = { [weak self] text in
+            Task { @MainActor in self?.toast?(text) }
+        }
+        // 脚本求值可能发网络请求，必须移出主线程，
+        // 否则发现页切源时会明显卡住（上一版卡顿投诉的一部分）。
+        let page = await Background.run { engine.explorePage() }
+        let parsed = page.categories
+        // 分类去重：上报的书源里同一分类偶尔重复出现，
+        // SwiftUI 的 ForEach 遇到重复 id 会直接 fatalError 崩溃。
+        var seenCategory = Set<String>()
+        categories = parsed.filter { seenCategory.insert($0.id).inserted }
+        // 控件同样去重：同名控件（七猫有多个「分类」性质的按钮）
+        // 会撞 id，SwiftUI 的 ForEach 遇到重复 id 直接崩溃。
+        var seenControl = Set<String>()
+        controls = page.controls.filter { seenControl.insert($0.id).inserted }
+        // 控件初值：书源声明的 default，没有就用第一个候选项
+        var values: [String: String] = [:]
+        for control in controls where !control.isButton {
+            if let value = control.defaultValue, !value.isEmpty {
+                values[control.title] = value
+            } else if let first = control.chars.first {
+                values[control.title] = first
+            }
+        }
+        controlValues = values
     }
 
     func select(category: ExploreCategory) async {
@@ -254,29 +462,4 @@ final class ExploreViewModel: ObservableObject {
         return output
     }
 
-    /// 解析发现分类（JSON 数组 / 单行 "标题::地址"）
-    private func parseCategories(_ raw: String) -> [ExploreCategory] {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-
-        if let array = trimmed.jsonObject as? [Any] {
-            return array.compactMap { item in
-                guard let dictionary = item as? [String: Any] else { return nil }
-                return ExploreCategory(dict: dictionary)
-            }
-        }
-
-        // "标题::地址" 逐行
-        var results: [ExploreCategory] = []
-        for line in trimmed.components(separatedBy: .newlines) {
-            let value = line.trimmingCharacters(in: .whitespaces)
-            guard !value.isEmpty, value.contains("::") else { continue }
-            let parts = value.components(separatedBy: "::")
-            var dictionary: [String: Any] = [:]
-            if parts.count >= 1 { dictionary["title"] = parts[0] }
-            if parts.count >= 2 { dictionary["url"] = parts[1] }
-            results.append(ExploreCategory(dict: dictionary))
-        }
-        return results
-    }
 }

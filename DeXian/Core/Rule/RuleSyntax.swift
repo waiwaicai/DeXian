@@ -196,6 +196,18 @@ enum RuleSyntax {
         var index = 0
         while index < characters.count {
             let character = characters[index]
+            // <js>…</js> 是内联脚本，整段跳过。
+            //
+            // 脚本里的 `##` / `||` 是**运算符或正则**，不是规则分隔符。
+            // 实测 36小说网的正文替换规则写作
+            //   <js>##36小说.*|起点中文.*|…</js><js>##(“|‘|’|…</js>
+            // 不跳过就会把第一个 `##` 当成「正则##替换」的分界，
+            // 规则被腰斩成 `<js>` 与半截正则 —— 后面那段再交给 JS 求值，
+            // 正是日志里的 SyntaxError: Unterminated regular expression literal。
+            if character == "<", let end = tagBlockEnd(characters, at: index, tag: "js") {
+                index = end + 1
+                continue
+            }
             if let activeQuote = quote {
                 if character == activeQuote { quote = nil }
                 index += 1
@@ -226,6 +238,13 @@ enum RuleSyntax {
 
         while index < characters.count {
             let character = characters[index]
+            // 同 findTopLevel：<js>…</js> 整体跳过，
+            // 脚本里的 `||` 是逻辑或，不能当成「候选规则」的分隔。
+            if character == "<", let end = tagBlockEnd(characters, at: index, tag: "js") {
+                current.append(contentsOf: characters[index...end])
+                index = end + 1
+                continue
+            }
             if let activeQuote = quote {
                 current.append(character)
                 if character == activeQuote { quote = nil }

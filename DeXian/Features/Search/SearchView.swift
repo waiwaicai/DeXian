@@ -27,6 +27,14 @@ struct SearchView: View {
         }
         .navigationTitle("搜索")
         .navigationBarTitleDisplayMode(.inline)
+        // 发现页表单里的「🔍搜索」按钮会往 appState.searchKeyword 放关键词，
+        // 这里取走后立刻发起一次搜索。
+        .onChange(of: appState.searchKeyword) { keyword in
+            guard let keyword, !keyword.trimmed.isEmpty else { return }
+            input = keyword
+            appState.searchKeyword = nil
+            performSearch(keyword: keyword)
+        }
     }
 
     // MARK: 搜索框
@@ -42,7 +50,7 @@ struct SearchView: View {
                     .font(.themeBody)
                     .submitLabel(.search)
                     .focused($isFocused)
-                    .onSubmit(performSearch)
+                    .onSubmit { performSearch() }
 
                 if !input.isEmpty {
                     Button {
@@ -64,7 +72,7 @@ struct SearchView: View {
                     .stroke(Theme.ColorToken.separator, lineWidth: 0.8)
             )
 
-            Button(action: performSearch) {
+            Button { performSearch() } label: {
                 Text("搜索")
                     .font(.themeCallout)
                     .fontWeight(.semibold)
@@ -275,9 +283,9 @@ struct SearchView: View {
 
     // MARK: 动作
 
-    private func performSearch() {
+    private func performSearch(keyword override: String? = nil) {
         isFocused = false
-        viewModel.search(keyword: input, sources: sources.sources)
+        viewModel.search(keyword: override ?? input, sources: sources.sources)
     }
 
     private func addToShelf(_ book: SearchBook) {

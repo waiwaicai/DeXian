@@ -1345,6 +1345,83 @@ console.warn = console.warn || console.log;
 console.info = console.info || console.log;
 console.debug = console.debug || console.log;
 
+// ---------------------------------------------------------------------------
+// infoMap：表单型发现源的输入值容器。
+//
+// 书源的 exploreUrl 会返回一组「表单控件 + 按钮」，按钮的 action 里用
+//     var k = infoMap['关键字']; ... java.searchBook(k, source);
+//     infoMap.put('分类', v); infoMap.save(); java.refreshExplore();
+// 读写用户填写的值。实测 45 处（17 个源）依赖它 ——
+// 宿主原先完全没有定义这个全局量，脚本一碰到就是
+//     ReferenceError: Can't find variable: infoMap
+// 整个表单脚本中断，用户看到的就是「内容分类里也无显示 / 点了没用」。
+//
+// 这里定义一个带 Map 语义 + 持久化的容器：
+// - 下标与 put / get 读写同一份数据；
+// - put / save / saveNow 会把内容写回 source.setVariable，
+//   于是「切换频道 / 切换接口」在下次刷新时仍然生效。
+// ---------------------------------------------------------------------------
+function __dxInfoMap() {
+  var api = {};
+
+  function persist() {
+    try {
+      var out = {};
+      for (var k in api) {
+        if (typeof api[k] !== 'function') { out[k] = api[k]; }
+      }
+      source.setVariable(JSON.stringify(out));
+    } catch (e) {}
+  }
+
+  api.put = function (k, v) { api[String(k)] = v; persist(); return v; };
+  api.set = function (k, v) { return api.put(k, v); };
+  api.get = function (k) {
+    var key = String(k);
+    return Object.prototype.hasOwnProperty.call(api, key) ? api[key] : null;
+  };
+  api.getOrDefault = function (k, d) {
+    var v = api.get(k);
+    return (v === null || v === undefined) ? d : v;
+  };
+  api.containsKey = function (k) { return Object.prototype.hasOwnProperty.call(api, String(k)); };
+  api.remove = function (k) { delete api[String(k)]; persist(); };
+  api.clear = function () { api = {}; persist(); };
+  api.save = persist;
+  api.saveNow = persist;
+  api.keys = function () {
+    var out = [];
+    for (var k in api) { if (typeof api[k] !== 'function') { out.push(k); } }
+    return out;
+  };
+  api.toString = function () {
+    try {
+      var out = {};
+      for (var k in api) {
+        if (typeof api[k] !== 'function') { out[k] = api[k]; }
+      }
+      return JSON.stringify(out);
+    } catch (e) { return '{}'; }
+  };
+
+  // 预填上一次保存的值：控件默认值也从这里读。
+  try {
+    var saved = source.getVariable();
+    if (saved) {
+      var obj = JSON.parse(saved);
+      if (obj && typeof obj === 'object') {
+        for (var key in obj) { api[key] = obj[key]; }
+      }
+    }
+  } catch (e) {}
+
+  return api;
+}
+
+if (typeof infoMap === 'undefined') {
+  var infoMap = __dxInfoMap();
+}
+
 """#
 
     /// 注入到指定上下文。

@@ -10,6 +10,7 @@ final class SourceEngine {
     let source: BookSource
     /// 书籍级共享变量（对应 book.variable，用于存 bookId 之类）
     let variables: VariableStore
+
     /// 请求头缓存。
     ///
     /// 不能用 lazy var：同一个 SourceEngine 会被并发使用
@@ -35,6 +36,15 @@ final class SourceEngine {
     /// 音频书源解析出的直链缓存，按章节地址区分（音源通常只返回一次）
     private var audioCache: [String: String] = [:]
     private let audioLock = NSLock()
+
+    // MARK: 表单型发现源的回调（由发现页注入）
+    //
+    // 「🔍搜索」按钮走 java.searchBook，要把关键词交回界面去开搜索页；
+    // 「切换频道」按钮走 java.refreshExplore，要让发现页重新求值；
+    // java.toast 要让用户看到提示。引擎只负责转发。
+    var onSearchBook: ((String) -> Void)?
+    var onRefreshExplore: (() -> Void)?
+    var onToast: ((String) -> Void)?
 
     /// 视频书源解析出的直链缓存。
     ///
@@ -83,6 +93,16 @@ final class SourceEngine {
         analyzer.page = page
         let urlString = analyzer.interpolate(urlTemplate)
 
+        // JS 里的全局 baseUrl 必须指向**真实请求地址**。
+        //
+        // 实测书源大量用 baseUrl 参与规则计算（听小说APP 用
+        // `String(baseUrl).split('/audiolist-4/')` 取书号、起点用
+        // `baseUrl.match(/\/(\d+)\//)` 取书籍 id）。baseUrl 停在书源入口域名时
+        // 这些计算全部落空，规则静默返回空串 —— 界面表现就是
+        // 「目录获取失败」「听书打不开」。旧实现只在抓页面时设过一次，
+        // 规则求值阶段拿到的仍是 source.url。
+        js.host.baseUrl = urlString
+
         let response = try await performRequest(
             urlString: urlString,
             options: request.options,
@@ -103,6 +123,61 @@ final class SourceEngine {
 
     // MARK: 发现
 
+    /// 执行表单控件的 action 脚本（按钮点击 / 下拉框切换）。
+    ///
+    /// 脚本一律通过全局 `infoMap` 读用户当前的选择，所以这里要先把
+    /// 界面上的控件值灌进 infoMap 再求值。返回脚本输出，便于测试断言。
+    @discardableResult
+    func evaluateFormAction(_ action: String, values: [String: String]) -> String {
+        let script = action.trimmed
+        guard !script.isEmpty else { return "" }
+        let js = makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+        // 先把控件值写进 infoMap：脚本马上会读它
+        for (key, value) in values {
+            js.setFormValue(key, value: value)
+        }
+        let output = js.evaluateString(script)
+        return output
+    }
+
+    /// 求值「发现页配置」：得到分类按钮与表单控件。
+    ///
+    /// exploreUrl 有两种形态，旧实现只处理了第一种：
+    /// 1. 静态文本 —— "玄幻::/a\n都市::/b" 或一个 JSON 数组字面量；
+    /// 2. 脚本体 —— `@js:` / `<js>`，**运行时**才生成列表。
+    ///
+    /// 第二种实测 136 个源，其中 5 个（七猫·API / 奈飞工厂 / 听小说APP /
+    /// 吉站漫画 / 终极全栖接口聚合）返回的是「下拉框 + 搜索按钮」这种表单，
+    /// 一部分项没有 url。旧实现把整串当文本解析，既不会执行脚本、也没有
+    /// 表单模型，于是发现页只剩零星几条 —— 用户看到的就是
+    /// 「内容分类里也无显示，都打不开」。
+    func explorePage() -> ExplorePage {
+        let raw = source.exploreUrl.trimmed
+        guard !raw.isEmpty else { return ExplorePage(categories: [], controls: []) }
+
+        let (kind, body) = RuleSyntax.detectKind(raw)
+        // 静态文本（含 "::" 列表或 JSON 数组字面量）不需要 JS
+        if kind != .javascript {
+            return ExplorePage.parse(raw)
+        }
+
+        let js = makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+        // body 已经是裸脚本（@js: / <js> 的前缀都被 detectKind 剥掉了），
+        // 直接求值。不能再跑一遍 resolveJSSegments：脚本字符串里出现
+        // "@js:" 字样时会被误判成「整串要重新求值」，反而把脚本吃掉。
+        // 脚本内部可能真的发请求（露西弗同人站会拉排行榜接口），这里允许。
+        let output = js.evaluateString(body)
+        if output.trimmed.isEmpty {
+            // 脚本没输出：返回空页。
+            //
+            // 不能退回 ExplorePage.parse(raw) —— 那会把整段脚本当成
+            // 「单条地址」，界面出现一个叫「全部」的入口，点下去拿
+            // 36415 字符的脚本文本去发请求。宁可为空，也不要造出假分类。
+            return ExplorePage(categories: [], controls: [])
+        }
+        return ExplorePage.parse(output)
+    }
+
     func explore(urlTemplate: String, page: Int = 1) async throws -> [SearchBook] {
         let js = makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
         js.page = page
@@ -117,6 +192,9 @@ final class SourceEngine {
         let parsed = HTTPClient.parseURLRule(resolved)
         var options = parsed.options
         options.method = options.method.isEmpty ? "GET" : options.method
+
+        // 同 search：发现规则里的 JS 也要能看到真实地址
+        js.host.baseUrl = parsed.url
 
         let content = try await fetchContent(urlString: parsed.url, options: options, page: page, keyword: "", js: js)
 
@@ -164,6 +242,14 @@ final class SourceEngine {
             return info
         }
 
+        // JS 里的 baseUrl 必须是**当前详情页地址**。
+        //
+        // 实测：听小说APP 的目录地址规则是
+        //   <js>String(baseUrl).replace('/bookinfo/','/audiolist-4/')…</js>
+        // baseUrl 停在书源入口域名时 replace 不生效，算出来的目录地址
+        // 少了书号，请求必然 404 —— 详情页表现就是「目录获取失败」。
+        js.host.baseUrl = target
+
         let content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "", js: js)
         let document = HTMLParser.parse(content)
 
@@ -198,6 +284,14 @@ final class SourceEngine {
         let js = makeJSEngine(content: nil, bookInfo: bookInfo, chapterInfo: [:], title: "")
         let analyzer = makeAnalyzer(content: nil, baseUrl: tocUrl, js: js)
         var target = analyzer.interpolate(tocUrl)
+
+        // 目录规则的 JS 大量依赖全局 baseUrl 取书号 / 页号。
+        //
+        // 实测听小说APP 的 chapterUrl 规则：
+        //   var bookId = String(baseUrl).split('/audiolist-4/')[1];
+        // baseUrl 若停在书源入口域名，bookId 是空串，签名与播放地址
+        // 全部算错 —— 用户看到的正是「听书源打不开」。
+        js.host.baseUrl = target
 
         var content = try await fetchContent(urlString: target, options: HTTPRequestOptions(), page: 1, keyword: "", js: js)
         var listAnalyzer = makeAnalyzer(content: content, baseUrl: target, js: js)
@@ -796,6 +890,28 @@ final class SourceEngine {
 
         let js = JSEngine(host: host)
         js.src = (content as? String) ?? ""
+
+        // 书源级变量注入 + 回写。
+        //
+        // 表单型发现源把用户的选择存在 source.getVariable() 里
+        // （七猫 / 奈飞工厂 / 听小说APP 的「切换频道」都是这个套路），
+        // 而引擎每次求值都会新建 JSEngine —— 不注入就等于每次刷新都重置，
+        // 用户点了频道切换却发现列表没变。
+        js.sourceVariable = SourceVariableStore.shared[source.id] ?? ""
+        // 变量注入后才能建出「带上次选择」的 infoMap
+        js.reloadInfoMap()
+
+        // 求值结束后回写：脚本里 source.setVariable(...) 的结果必须落盘，
+        // 否则「切换频道」这类选择在下次刷新时又回到默认值。
+        js.onVariableChanged = { [weak self] value in
+            guard let self else { return }
+            SourceVariableStore.shared[self.source.id] = value
+        }
+
+        // 表单按钮：搜索 / 刷新发现 / 提示
+        js.onSearchBook = { [weak self] keyword in self?.onSearchBook?(keyword) }
+        js.onRefreshExplore = { [weak self] in self?.onRefreshExplore?() }
+        js.onToast = { [weak self] text in self?.onToast?(text) }
 
         // 让 java.getString / java.setContent 回到规则引擎
         js.host.resolveString = { [weak js] rule, target, _ in

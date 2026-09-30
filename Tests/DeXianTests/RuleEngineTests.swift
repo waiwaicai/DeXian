@@ -1825,6 +1825,168 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(unique.count, 2)
     }
 
+    // MARK: 表单型发现源
+    //
+    // yckceo 上有一批源的 exploreUrl 返回的是「控件 + 按钮」，而不是纯分类。
+    // 旧解析只认 title+url，没有 url 的项被整条丢掉，于是这些源的
+    // 「发现」页只剩零星几条甚至全空 —— 用户反馈的
+    // 「内容分类里也无显示，都打不开」正是这个。
+
+    /// 无 url 的控件要被识别成表单项，而不是被丢弃
+    func testExplorePageParsesFormControls() {
+        let raw = """
+        [
+          {"title":"关键字","type":"text"},
+          {"title":"🔍 搜剧","type":"button","action":"java.searchBook(infoMap['关键字'], source)"},
+          {"title":"频道","type":"select","chars":["电影","电视剧"],"default":"电影",
+           "action":"var c=infoMap['频道']; java.refreshExplore();"},
+          {"title":"全部","url":"https://a.test/list/{{page}}"}
+        ]
+        """
+        let page = ExplorePage.parse(raw)
+        XCTAssertEqual(page.categories.count, 1, "只有带 url 的项才是分类")
+        XCTAssertEqual(page.categories.first?.title, "全部")
+        XCTAssertEqual(page.controls.count, 3, "三个无 url 的控件必须全部保留")
+
+        let types = page.controls.map(\.type)
+        XCTAssertTrue(types.contains("text"))
+        XCTAssertTrue(types.contains("button"))
+        XCTAssertTrue(types.contains("select"))
+
+        let select = page.controls.first { $0.type == "select" }
+        XCTAssertEqual(select?.chars, ["电影", "电视剧"])
+        XCTAssertEqual(select?.defaultValue, "电影")
+        XCTAssertTrue(select?.isSelect ?? false)
+        XCTAssertFalse(select?.isButton ?? true)
+    }
+
+    /// 静态 "标题::地址" 文本仍要解析成分类，且走同一套入口
+    func testExplorePageParsesColonList() {
+        let page = ExplorePage.parse("玄幻::/xuanhuan\n都市::/dushi")
+        XCTAssertEqual(page.categories.count, 2)
+        XCTAssertEqual(page.categories.first?.title, "玄幻")
+        XCTAssertEqual(page.categories.first?.url, "/xuanhuan")
+        XCTAssertTrue(page.controls.isEmpty)
+    }
+
+    /// 单条裸地址兜底成「全部」入口：整页不能一条都点不动
+    func testExplorePageFallsBackToSingleEntry() {
+        let page = ExplorePage.parse("https://a.test/list/1.html")
+        XCTAssertEqual(page.categories.count, 1)
+        XCTAssertEqual(page.categories.first?.title, "全部")
+        XCTAssertEqual(page.categories.first?.url, "https://a.test/list/1.html")
+    }
+
+    /// 空的 / nil 输入不能崩，也不能造出假分类
+    func testExplorePageHandlesEmptyInput() {
+        XCTAssertTrue(ExplorePage.parse(nil).isEmpty)
+        XCTAssertTrue(ExplorePage.parse("").isEmpty)
+        XCTAssertTrue(ExplorePage.parse("[]").isEmpty)
+    }
+
+    /// source.getVariable() 未保存过时必须返回空串而不是 null。
+    ///
+    /// 书源普遍写 `JSON.parse(source.getVariable() || '{}')`，
+    /// 但有 23 处（13 个源）直接写 `JSON.parse(source.getVariable())`：
+    /// 返回 null 时 JSON.parse(null) 不抛错、返回 null，
+    /// 紧接着对 null 取属性就是 TypeError，整段脚本被打断 ——
+    /// 表现是「短剧 / 听书打不开」。返回空串才会走书源自己的 catch。
+    func testGetVariableReturnsEmptyStringWhenUnset() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("source.getVariable()"), "")
+        XCTAssertEqual(engine.evaluateString("typeof source.getVariable()"), "string")
+        // 书源的真实分支：返回空串时 JSON.parse('') 会抛错，被 catch 兜住
+        let guarded = engine.evaluateString("""
+        (function(){
+          var cfg = {};
+          try { cfg = JSON.parse(source.getVariable() || '{}') || {}; } catch (e) {}
+          return cfg.ch || 'default';
+        })()
+        """)
+        XCTAssertEqual(guarded, "default")
+    }
+
+    /// setVariable 要能回传新值（表单「切换频道」靠它跨次保留选择）
+    func testSetVariableNotifiesHost() {
+        let engine = JSEngine(host: JSEngine.Host())
+        var stored = ""
+        engine.onVariableChanged = { stored = $0 }
+        _ = engine.evaluate("source.setVariable(JSON.stringify({channel:'电视剧'}))")
+        XCTAssertEqual(engine.sourceVariable, #"{"channel":"电视剧"}"#)
+        XCTAssertEqual(stored, #"{"channel":"电视剧"}"#)
+    }
+
+    /// 全局 infoMap 必须存在：缺失时表单脚本一行都跑不动
+    func testInfoMapGlobalExists() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof infoMap"), "object")
+        XCTAssertEqual(engine.evaluateString("typeof infoMap.put"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof infoMap.save"), "function")
+        // 书源真实写法：读一个还没填过的控件得到 null，而不是抛异常
+        XCTAssertEqual(engine.evaluateString("String(infoMap['关键字'] || '')"), "")
+        _ = engine.evaluate("infoMap.put('频道','女频')")
+        XCTAssertEqual(engine.evaluateString("infoMap['频道']"), "女频")
+        XCTAssertEqual(engine.evaluateString("infoMap.get('频道')"), "女频")
+    }
+
+    /// java.searchBook 要真的把关键词交回宿主（不再走 noop）
+    func testSearchBookCallbackFires() {
+        let engine = JSEngine(host: JSEngine.Host())
+        var captured: [String] = []
+        engine.onSearchBook = { captured.append($0) }
+        _ = engine.evaluate("java.searchBook('剑来', source)")
+        XCTAssertEqual(captured, ["剑来"])
+        // 空关键词不该触发搜索
+        _ = engine.evaluate("java.searchBook('', source)")
+        XCTAssertEqual(captured, ["剑来"])
+    }
+
+    /// java.refreshExplore 要通知宿主重算，而不是空实现
+    func testRefreshExploreCallbackFires() {
+        let engine = JSEngine(host: JSEngine.Host())
+        var count = 0
+        engine.onRefreshExplore = { count += 1 }
+        _ = engine.evaluate("java.refreshExplore()")
+        XCTAssertEqual(count, 1)
+    }
+
+    /// 脚本体 exploreUrl 不能被「标题::地址」规则切碎。
+    ///
+    /// 脚本里出现 `::` 很常见（七猫的分组名、晋江的
+    /// `const separator = '::'`、超星的接口地址…）。旧实现见到 `::`
+    /// 就按分类列表逐行切，12 个脚本型源（含 36415 字符的七猫）
+    /// 被切成一堆垃圾 JSON、整段脚本丢失 —— 发现页因此空白。
+    func testScriptExploreUrlSurvivesImport() {
+        let script = """
+        @js:
+        var groups = ['排行榜', '分类::玄幻'];
+        var s = [];
+        s.push({title: '全部', url: 'https://a.test/list/{{page}}'});
+        JSON.stringify(s);
+        """
+        let source = BookSource(dict: [
+            "bookSourceName": "脚本源",
+            "bookSourceUrl": "https://a.test",
+            "exploreUrl": script
+        ])
+        XCTAssertTrue(source.exploreUrl.hasPrefix("@js:"), "脚本体必须原样保留")
+        XCTAssertTrue(source.exploreUrl.contains("分类::玄幻"), "脚本里的 :: 不能被切开")
+        XCTAssertFalse(source.exploreUrl.hasPrefix("["), "不能被转成分类数组 JSON")
+    }
+
+    /// 静态 "标题::地址" 仍然要转成标准分类数组
+    func testPlainColonListStillBecomesCategories() {
+        let source = BookSource(dict: [
+            "bookSourceName": "静态源",
+            "bookSourceUrl": "https://b.test",
+            "exploreUrl": "玄幻::/xuanhuan\n都市::/dushi"
+        ])
+        XCTAssertTrue(source.exploreUrl.hasPrefix("["), "静态列表应转为 JSON 数组")
+        let page = ExplorePage.parse(source.exploreUrl)
+        XCTAssertEqual(page.categories.count, 2)
+        XCTAssertEqual(page.categories.first?.url, "/xuanhuan")
+    }
+
     // MARK: 内存 / 生命周期回归
     //
     // 这一组锁死「搜索引擎必须能释放」这个不变量。

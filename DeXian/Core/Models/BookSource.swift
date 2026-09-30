@@ -332,6 +332,13 @@ struct BookSource: Codable, Hashable, Identifiable {
         if let text = any as? String {
             let value = text.trimmed
             if value.hasPrefix("[") { return value }
+            // 脚本体原样保留。
+            //
+            // 脚本里出现 `::` 非常常见（七猫的分组名、晋江的 `const separator = '::'`、
+            // 超星的接口地址…）。旧实现只要看到 `::` 就按「标题::地址」逐行切，
+            // 于是 12 个脚本型源（含 36415 字符的七猫）被切成一堆垃圾 JSON，
+            // 整段脚本丢失 —— 发现页表现就是「内容分类里也无显示」。
+            if value.hasPrefix("@js:") || value.hasPrefix("<js>") { return value }
             // Legado 允许单行 "分类名::url" 用换行分隔
             if value.contains("::") { return buildCategories(from: value) }
             return value
@@ -380,6 +387,88 @@ struct ExploreCategoryList: Codable, Hashable {
     }
 
     var isEmpty: Bool { items.isEmpty }
+}
+
+/// 发现页的表单控件。
+///
+/// yckceo 上有一批源的 exploreUrl 返回的不只是分类，而是一组「控件 + 按钮」：
+///
+///     { title: '关键字', type: 'text' }
+///     { title: '频道', type: 'select', chars: ['男频','女频'], action: '…' }
+///     { title: '🔍搜索', type: 'button', action: 'java.searchBook(infoMap…)' }
+///
+/// 这类项没有 url，旧解析只认 title+url，于是整屏只剩零星分类 ——
+/// 用户看到的就是「内容分类里也无显示」。这里把它们单独建模并渲染成表单。
+struct ExploreFormItem: Codable, Hashable, Identifiable {
+    /// 标题 + 类型 + 候选项：同一屏里出现两个同名控件时不能让 id 撞车，
+    /// 否则 SwiftUI 的 ForEach 会直接 fatalError 崩溃。
+    var id: String { title + "|" + type + "|" + chars.joined(separator: ",") }
+    var title: String
+    /// text / button / select / toggle / 其它
+    var type: String
+    /// select / toggle 的候选项
+    var chars: [String]
+    var defaultValue: String?
+    /// 按钮或控件变化时执行的脚本
+    var action: String?
+
+    init(dict: [String: Any]) {
+        title = dict.str("title", "name", "text") ?? ""
+        type = (dict.str("type", "kind") ?? "text").lowercased()
+        chars = (dict.arr("chars", "options", "items") ?? []).compactMap { asString($0) }
+        defaultValue = dict.str("default", "defaultValue", "value")
+        action = dict.str("action", "onChange", "click")
+    }
+
+    var isButton: Bool { type == "button" }
+    var isSelect: Bool { type == "select" || type == "toggle" || !chars.isEmpty }
+}
+
+/// 一次发现页求值的结果：分类按钮 + 表单控件。
+struct ExplorePage {
+    var categories: [ExploreCategory]
+    var controls: [ExploreFormItem]
+
+    var isEmpty: Bool { categories.isEmpty && controls.isEmpty }
+
+    /// 从 exploreUrl 求值出来的原始值（JSON 数组 / "标题::地址" 文本 / 单条地址）。
+    static func parse(_ raw: Any?) -> ExplorePage {
+        // "标题::地址" 逐行：Legado 的历史写法，没有 JSON 结构
+        if let text = asString(raw), !text.trimmed.isEmpty, text.trimmed.hasPrefix("[") == false {
+            let trimmed = text.trimmed
+            if trimmed.contains("::"), !trimmed.contains("{") {
+                var categories: [ExploreCategory] = []
+                for line in trimmed.components(separatedBy: .newlines) {
+                    let value = line.trimmed
+                    guard !value.isEmpty, value.contains("::") else { continue }
+                    let parts = value.components(separatedBy: "::")
+                    var dict: [String: Any] = [:]
+                    if parts.count >= 1 { dict["title"] = parts[0] }
+                    if parts.count >= 2 { dict["url"] = parts[1] }
+                    categories.append(ExploreCategory(dict: dict))
+                }
+                if !categories.isEmpty { return ExplorePage(categories: categories, controls: []) }
+            }
+            // 单条地址：兜底成一个「全部」入口，否则整页什么都点不动
+            return ExplorePage(
+                categories: [ExploreCategory(dict: ["title": "全部", "url": trimmed])],
+                controls: []
+            )
+        }
+
+        var categories: [ExploreCategory] = []
+        var controls: [ExploreFormItem] = []
+        for dict in asDictArray(raw) {
+            let item = ExploreFormItem(dict: dict)
+            let hasURL = !(dict.str("url", "link", "href") ?? "").trimmed.isEmpty
+            if hasURL {
+                categories.append(ExploreCategory(dict: dict))
+            } else if !item.title.isEmpty {
+                controls.append(item)
+            }
+        }
+        return ExplorePage(categories: categories, controls: controls)
+    }
 }
 
 extension String {

@@ -43,7 +43,11 @@ final class JSEngine {
     let context: JSContext?
     private let lock = NSRecursiveLock()
 
-    private var sourceVariable: String = ""
+    /// 书源级变量（Legado 的 source.getVariable / setVariable）。
+    ///
+    /// 由 SourceEngine 在构造时注入、求值后取回并落盘，因此不能是 private：
+    /// 表单型发现源「切换频道 / 切换接口」正是靠它跨次保留选择。
+    var sourceVariable: String = ""
     private var loginHeader: String?
     private var loginInfo: [String: String] = [:]
     private var cache: [String: String] = [:]
@@ -95,6 +99,22 @@ final class JSEngine {
     /// 供需要「等待用户操作」的脚本调用（如 java.startBrowserAwait）。
     /// 由外部注入：运行在后台线程，内部自行切主线程弹出界面。
     var awaitUserAction: ((String, String) -> String)?
+
+    /// 表单型发现源的按钮脚本会调用 `java.searchBook(keyword, source)`。
+    /// 实测 5 个源（吉站漫画 / 听小说APP / 奈飞工厂 / 终极全栖接口聚合 / 七猫·API）
+    /// 把「🔍搜索」按钮写成 `java.searchBook(infoMap['关键字'], source)`。
+    /// 宿主把关键词接回界面，由搜索页跑一次全局搜索 —— 否则这个按钮点下去
+    /// 只会静默走 noop，用户看到的就是「右上角加号点了没用」。
+    var onSearchBook: ((String) -> Void)?
+
+    /// 表单控件变化时脚本调用 `java.refreshExplore()` 要求重新求值发现页。
+    var onRefreshExplore: (() -> Void)?
+
+    /// 脚本调用 `java.toast / longToast` 时的用户提示。
+    var onToast: ((String) -> Void)?
+
+    /// 脚本调用 `source.setVariable(...)` 时把新值交给宿主持久化。
+    var onVariableChanged: ((String) -> Void)?
 
     /// 在 JS 求值内部同步等待用户完成网页操作（验证码 / 登录）。
     ///
@@ -338,6 +358,23 @@ final class JSEngine {
         _ = evaluate(trimmed)
     }
 
+    /// 重建全局 infoMap。
+    ///
+    /// infoMap 在 setup 阶段由兼容层创建，那时 `sourceVariable` 还没注入，
+    /// 预填值必然是空的。宿主注入书源变量之后必须重建一次，
+    /// 否则表单控件显示的还是默认值，用户上次的选择被无声丢弃。
+    func reloadInfoMap() {
+        guard context != nil else { return }
+        _ = evaluate("if (typeof __dxInfoMap === 'function') { infoMap = __dxInfoMap(); }")
+    }
+
+    /// 往全局 infoMap 里写一个控件值（表单 action 执行前调用）。
+    func setFormValue(_ name: String, value: String) {
+        guard let context, let infoMap = context.objectForKeyedSubscript("infoMap"),
+              !infoMap.isUndefined, !infoMap.isNull else { return }
+        infoMap.setObject(value, forKeyedSubscript: name as NSString)
+    }
+
     // MARK: 环境搭建
 
     private func setup() {
@@ -570,8 +607,12 @@ final class JSEngine {
         java.setObject(t2s, forKeyedSubscript: "t2s" as NSString)
         java.setObject(t2s, forKeyedSubscript: "s2t" as NSString)
 
-        let toast: @convention(block) (JSValue) -> Void = { value in
-            Log.debugLog("JS toast", JSEngine.stringFrom(value))
+        let toast: @convention(block) (JSValue) -> Void = { [weak self] value in
+            let text = JSEngine.stringFrom(value)
+            Log.debugLog("JS toast", text)
+            // 表单型发现源用 java.toast('请输入关键字') 提示用户；
+            // 只写日志的话用户看不到任何反馈，会以为按钮坏了。
+            self?.onToast?(text)
         }
         java.setObject(toast, forKeyedSubscript: "toast" as NSString)
         java.setObject(toast, forKeyedSubscript: "longToast" as NSString)
@@ -582,7 +623,12 @@ final class JSEngine {
         java.setObject(getUserAgent, forKeyedSubscript: "getUserAgent" as NSString)
         java.setObject(getUserAgent, forKeyedSubscript: "getWebViewUA" as NSString)
 
-        let refreshExplore: @convention(block) () -> Void = {}
+        // java.refreshExplore()：表单控件变化后要求发现页重新求值。
+        // 实测 51 处（21 个源）。空实现时「切换频道 / 切换接口」点下去
+        // 界面毫无变化，用户看到的就是「点了没用」。
+        let refreshExplore: @convention(block) () -> Void = { [weak self] in
+            self?.onRefreshExplore?()
+        }
         java.setObject(refreshExplore, forKeyedSubscript: "refreshExplore" as NSString)
 
         java.setObject(host.baseUrl, forKeyedSubscript: "url" as NSString)
@@ -606,14 +652,24 @@ final class JSEngine {
         }
         source.setObject(getKey, forKeyedSubscript: "getKey" as NSString)
 
-        let getVariable: @convention(block) () -> String? = { [weak self] in
-            guard let value = self?.sourceVariable, !value.isEmpty else { return nil }
-            return value
+        // 对齐 Legado：未保存过变量时返回**空串**，而不是 null。
+        //
+        // 书源普遍写 `JSON.parse(source.getVariable() || '{}')`，
+        // 但也有 23 处（13 个源）直接写 `JSON.parse(source.getVariable())`。
+        // JSON.parse(null) 不抛错、返回 null，于是紧接着的
+        // `cfg.ch` / `vars.group` 就对 null 取属性 ——
+        // TypeError 把整段脚本打断，用户看到的是「短剧 / 听书打不开」。
+        // 返回空串时 JSON.parse('') 会抛错，正好落进书源自己的 try/catch 兜底。
+        let getVariable: @convention(block) () -> String = { [weak self] in
+            self?.sourceVariable ?? ""
         }
         source.setObject(getVariable, forKeyedSubscript: "getVariable" as NSString)
 
         let setVariable: @convention(block) (JSValue) -> Void = { [weak self] value in
-            self?.sourceVariable = JSEngine.stringFrom(value)
+            guard let self else { return }
+            let text = JSEngine.stringFrom(value)
+            self.sourceVariable = text
+            self.onVariableChanged?(text)
         }
         source.setObject(setVariable, forKeyedSubscript: "setVariable" as NSString)
 

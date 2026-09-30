@@ -15,6 +15,13 @@ final class AppState: ObservableObject {
     @Published var readingBook: ShelfBook?
     @Published var toast: ToastMessage?
 
+    /// 跨页搜索请求：发现页表单里的「🔍搜索」按钮会把关键词放这里，
+    /// 搜索页切前台后取走并立即发起一次搜索。
+    ///
+    /// 直接调 SearchViewModel 做不到：视图模型的实例属于搜索页，
+    /// 发现页拿不到它（两个页面各自持有 @StateObject）。
+    @Published var searchKeyword: String?
+
     struct ToastMessage: Identifiable, Equatable {
         var id = UUID()
         var text: String

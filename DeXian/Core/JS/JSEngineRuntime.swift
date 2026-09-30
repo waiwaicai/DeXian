@@ -374,9 +374,23 @@ extension JSEngine {
         java.setObject(getVerificationCode, forKeyedSubscript: "getVerificationCode" as NSString)
 
         let noop: @convention(block) (JSValue) -> Void = { _ in }
-        for name in ["openBook", "openVideoPlayer", "openWeb", "reLoginView", "initUrl", "downloadFile", "readTxtFile", "searchBook"] {
+        for name in ["openBook", "openVideoPlayer", "openWeb", "reLoginView", "initUrl", "downloadFile", "readTxtFile"] {
             java.setObject(noop, forKeyedSubscript: name as NSString)
         }
+
+        // java.searchBook(keyword, source)：表单型发现源的「🔍 搜索」按钮走这里。
+        //
+        // 单靠 noop 时按钮点下去没有任何反应。实测 5 个源（吉站漫画 / 听小说APP /
+        // 奈飞工厂 / 终极全栖接口聚合 / 七猫·API）的按钮动作是
+        //     var k = infoMap['关键字']; if(!k){ java.toast('请输入关键字'); }
+        //     else { java.searchBook(k, source); }
+        // 这里把关键词交回宿主，由界面切到搜索页跑一次全局搜索。
+        let searchBook: @convention(block) (JSValue, JSValue) -> Void = { [weak self] keywordValue, _ in
+            let keyword = JSEngine.stringFrom(keywordValue).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !keyword.isEmpty else { return }
+            self?.onSearchBook?(keyword)
+        }
+        java.setObject(searchBook, forKeyedSubscript: "searchBook" as NSString)
 
         let open: @convention(block) (JSValue) -> Void = { value in
             Log.debugLog("JS", "open: " + JSEngine.stringFrom(value))
