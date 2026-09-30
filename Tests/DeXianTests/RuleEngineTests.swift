@@ -2610,27 +2610,4 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString(script), "3,7")
     }
 
-    /// 临时诊断：定位裸解构箭头脚本断在求值管线的哪一步。
-    func testDiagnoseBareDestructuringPipeline() {
-        let script = """
-        var out = [];
-        [[1,2],[3,4]].map([a,b]=>{ out.push(a+b); });
-        out.join(',')
-        """
-        let norm = ScriptNormalizer.normalizeArrowParameters(script)
-        let cands = JSEngine.scriptCandidates(script)
-        let normCands = JSEngine.normalizedCandidates(script)
-        let engine = JSEngine(host: JSEngine.Host())
-        let direct = engine.evaluate(script)
-        let normal = engine.evaluate(norm ?? "")
-        var report = "normalize -> " + (norm ?? "NIL") + "\n"
-        report += "candidates[" + String(cands.count) + "] " + cands.joined(separator: " ||| ") + "\n"
-        report += "normCandidates[" + String(normCands.count) + "] " + normCands.joined(separator: " ||| ") + "\n"
-        report += "evaluate(script) -> " + String(describing: direct) + "\n"
-        report += "evaluate(normalized) -> " + String(describing: normal) + "\n"
-        report += "JS log: " + Log.recent.filter { $0.category == "JS" }.map { $0.message }.joined(separator: " ;; ") + "\n"
-        report += "DIAG log: " + Log.recent.filter { $0.category == "DIAG" }.map { $0.message }.joined(separator: " ;; ") + "\n"
-        XCTFail("DIAGNOSTIC >>> " + report)
-    }
-
 }
