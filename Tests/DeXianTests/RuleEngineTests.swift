@@ -2610,4 +2610,364 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString(script), "3,7")
     }
 
+    // MARK: 开头链式 `@` 与 `@js:` 标志
+
+    /// 以 `@js:` 开头的规则不能被切出一个空首段。
+    ///
+    /// 症状：`@js:` 开头的正文规则整条作废，小说正文一个字都看不到，
+    /// 调试日志里出现 "result.match is not a function"。
+    ///
+    /// 根因：splitChain 把开头的 `@` 当链分隔符，产生 ["", "js:…"]。
+    /// 空首段求值成 .strings([])，这个**空数组**被当作脚本的 result。
+    /// 实测 3460 个源里有 995 条规则以 `@js:` 开头。
+    func testLeadingJSMarkerKeepsWholeScript() {
+        let segments = RuleSyntax.splitChain("@js: result.match(/x/)[1]")
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertTrue(segments[0].hasPrefix("@js:"))
+
+        // `@@` 与 `@css:` / `@xpath:` 这些显式标志同理
+        XCTAssertEqual(RuleSyntax.splitChain("@@h1@text").first, "@@h1")
+        XCTAssertEqual(RuleSyntax.splitChain("@css:div p").count, 1)
+        XCTAssertEqual(RuleSyntax.splitChain("@xpath://div/a").count, 1)
+    }
+
+    /// 以 `@js:` 开头的正文规则必须真的跑出正文。
+    func testLeadingJSRuleStillReturnsContent() {
+        let html = "<div id='c'>正文第一段</div>"
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(analyzer.string("@js: '结果:' + java.getString('#c@text')"), "结果:正文第一段")
+    }
+
+    /// 规则以链式 `@` 开头时，作用于当前节点。
+    ///
+    /// 目录规则大量写成「chapterList 选中 <a>，chapterUrl = @href」。
+    /// 旧实现切出空首段，结果恒为空 —— 表现是「目录名 / 章节地址整列取不到」。
+    func testLeadingChainMarkerAppliesToCurrentNode() {
+        let html = "<a href='/book/1' title='第一章'>一</a>"
+        let js = JSEngine(host: JSEngine.Host())
+        let node = HTMLParser.parse(html)
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: node, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let itemAnalyzer = SourceEngine.makeAnalyzer(
+            content: HTMLParser.parse(html).children.first,
+            baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(itemAnalyzer.firstString("@href"), "/book/1")
+        XCTAssertEqual(itemAnalyzer.string("@text"), "一")
+        XCTAssertEqual(itemAnalyzer.string("@title"), "第一章")
+        // 文档根节点上取 baseUrl 表示当前页面地址
+        XCTAssertEqual(analyzer.string("@baseUrl"), "https://a.com")
+        // 多段形态：先选子元素，再取属性
+        let listAnalyzer = SourceEngine.makeAnalyzer(
+            content: HTMLParser.parse("<li><a href='/book/2'>二</a></li>"),
+            baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(listAnalyzer.firstString("@a@href"), "/book/2")
+    }
+
+    /// 文本规则的 result 必须是字符串，不能是数组。
+    ///
+    /// 症状：命中多条时 `result.match(...)` 报 "result.match is not a function"，
+    /// 字数 / 分类 / 简介空着。
+    /// 实测文本字段里对 result 调字符串方法的规则 280 条、调数组方法的 0 条。
+    func testTextRuleResultIsJoinedString() {
+        let html = "<div class='t'><p>时长 12.5万</p><p>字数 3.4万</p></div>"
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        // 命中多条时 result 仍是字符串：能调 match / split
+        XCTAssertEqual(analyzer.string(".t p@text@js:typeof result"), "string")
+        XCTAssertEqual(analyzer.string(".t p@text@js:result.split('\\n').length"), "2")
+    }
+
+    /// 列表规则的 result 必须保持数组：书源写 result.toArray() / result.length。
+    func testListRuleResultStaysArray() {
+        let json = "{\"items\":[{\"id\":1},{\"id\":2}]}"
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: json, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let items = analyzer.listItems("$.items[*]@js:(Array.isArray(result) ? 'array' : 'other') + result.length")
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(RuleUtil.asString(items[0]), "array2")
+    }
+
+    /// loginCheckJs 里的 result 是响应对象，能调 body() / code() / url()。
+    ///
+    /// 症状：调试日志里刷屏
+    ///     TypeError: null is not an object (evaluating 'result.body')
+    /// 「人机验证框」该弹不弹。
+    ///
+    /// 根因：登录检查脚本只注入了 src（正文），result 还是规则链上一步的值。
+    /// Legado 是 evalJS(loginCheckJs, strResponse)，result 必须是响应对象。
+    func testLoginCheckScriptSeesResponseObject() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let response = HTTPResponse(
+            data: Data(),
+            text: "<html>Just a moment</html>",
+            headers: ["Server": "cloudflare"],
+            statusCode: 403,
+            finalURL: URL(string: "https://a.com/s?q=1")
+        )
+        // 验证页判定：脚本按 Legado 的写法读 result.body() / result.code()
+        let script = "var b = String(result.body() || ''); var c = result.code(); "
+            + "/Just a moment/.test(b) && c >= 403 ? 'needVerify' : 'ok'"
+        XCTAssertEqual(RuleUtil.asString(engine.evaluateLoginCheck(script, response: response)), "needVerify")
+
+        // 覆盖只对这一次求值生效：嵌套求值（java.getString）必须拿到自己的 result
+        engine.result = "干净的值"
+        XCTAssertEqual(engine.evaluateString("String(result)"), "干净的值")
+    }
+
+    // MARK: 书源兼容层（全量语料缺口）
+
+    /// 全量语料实测的缺口 API 必须都注册上。
+    ///
+    /// 依据：yckceo「阅读」近一年 953 个条目展开后的 19 万个书源，
+    /// 逐条统计 `java.xxx(` 调用点再与本工程求差集。
+    /// 这些调用普遍**裸写**（不在 try 里），缺一个就是
+    /// `undefined is not a function` 把整段脚本打断。
+    func testCompatJavaApisAreRegistered() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let names = [
+            "deviceID", "getAppVariant", "webViewUA",
+            "refreshTocUrl", "refreshBookUrl", "refreshBookInfo", "refreshContent",
+            "refreshBook", "reGetBook", "refreshBookToc",
+            "setBaseUrl", "getRedirectUrl", "initUrl",
+            "importScript", "readTxtFile", "readFile", "deleteFile",
+            "downloadFile", "cacheFile", "getZipStringContent",
+            "desEncodeToBase64String", "aesEncodeToBase64String",
+            "aesBase64DecodeToByteArray", "aesDecodeArgsBase64Str",
+            "showReadingBrowser", "startBrowserDp", "openVideoPlayer", "showPhoto",
+            "upLoginData", "reLoginView", "getResponse", "getHeaderMap",
+            "webViewGetOverrideUrl", "logType", "putSharedData",
+            "getReadBookConfigMap", "getThemeConfigMap", "getThemeConfig",
+            "clearCookie", "urlEncode", "openWeb", "openBook",
+            "toURL", "aJax", "ajaxAwait", "postForm", "postAwait", "fetch",
+            "toString", "addBook", "setClipboard", "startBrowserAwaitAwait",
+            "connect", "ajax", "get", "post", "base64Encode", "base64Decode",
+            "md5Encode", "timeFormat", "toast", "longToast"
+        ]
+        for name in names {
+            let type = engine.evaluateString("typeof java." + name)
+            XCTAssertEqual(type, "function", "java.\(name) 未注册，类型是 \(type)")
+        }
+    }
+
+    /// 两个探测型 API 必须**保持未定义**，否则源会走错分支。
+    ///
+    /// - `java.qread`：源阅专有，141 个源写
+    ///   `try { java.qread(); isqread = true } catch(e) {}` 探测环境。
+    /// - `java.ocr`：阅读 T 版专有，4 个源用 `typeof java.ocr === "function"`
+    ///   判断要不要走 T 版接口。
+    ///
+    /// 注册它们等于冒充另一个客户端，接口参数与返回结构都不一样。
+    func testProbeApisStayUndefined() {
+        let engine = JSEngine(host: JSEngine.Host())
+        for name in ["qread", "ocr"] {
+            XCTAssertEqual(
+                engine.evaluateString("typeof java." + name),
+                "undefined",
+                "java.\(name) 是环境探针，必须保持 undefined"
+            )
+        }
+    }
+
+    /// `java.readBookConfig` 是**存在性探针**，必须是空串而不是对象。
+    ///
+    /// 28 个源写 `if (typeof java.readBookConfig == "undefined") { 提示升级 }`。
+    /// 注册成对象会让类型判断变成 "string"… 或直接让源以为配置可用。
+    func testReadBookConfigProbeShape() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof java.readBookConfig"), "string")
+        XCTAssertEqual(engine.evaluateString("java.readBookConfig"), "")
+    }
+
+    /// 普通 UA 与 WebView UA 必须**不同**。
+    ///
+    /// 14 个源写 `java.getUserAgent() === java.getWebViewUA()` 来判断
+    /// 自己是否跑在「源阅」上。两者相同时会误判成源阅，走错分支。
+    func testUserAgentDiffersFromWebViewUA() {
+        let engine = JSEngine(host: JSEngine.Host())
+        let same = engine.evaluateString("java.getUserAgent() === java.getWebViewUA()")
+        XCTAssertEqual(same, "false")
+    }
+
+    /// `book.setReverseToc(bool)` 必须存在并回写宿主（581 个源在用）。
+    func testBookReverseTocWriteBack() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof book.setReverseToc"), "function")
+        _ = engine.evaluateString("book.setReverseToc(true)")
+        XCTAssertEqual(engine.bookMutation.reverseToc, true)
+        _ = engine.evaluateString("book.setReverseToc(false)")
+        XCTAssertEqual(engine.bookMutation.reverseToc, false)
+    }
+
+    /// `source.putLoginInfo(json)` 必须把账号信息回写宿主（349 个源在用）。
+    ///
+    /// 书源写法：`let a = source.getLoginInfoMap(); a["账号"]=…; source.putLoginInfo(JSON.stringify(a))`
+    func testPutLoginInfoCapturesAccount() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof source.putLoginInfo"), "function")
+        var captured: [String: String] = [:]
+        engine.onLoginInfoChanged = { info in captured = info }
+        _ = engine.evaluateString(#"source.putLoginInfo(JSON.stringify({"账号":"u1","密码":"p2"}))"#)
+        XCTAssertEqual(captured["账号"], "u1")
+        XCTAssertEqual(captured["密码"], "p2")
+    }
+
+    /// `source.variable` 属性赋值必须经过 setter（28 个源直接赋值）。
+    ///
+    /// 不接 setter 的话宿主的 onVariableChanged 收不到通知，
+    /// 用户改的源变量下次刷新又回到默认值。
+    func testSourceVariablePropertySetter() {
+        let engine = JSEngine(host: JSEngine.Host())
+        var changed = ""
+        engine.onVariableChanged = { changed = $0 }
+        _ = engine.evaluateString(#"source.variable = JSON.stringify({"ch":"都市"})"#)
+        XCTAssertTrue(changed.contains("都市"), "setter 没触发，实际：\(changed)")
+        XCTAssertEqual(engine.evaluateString("source.variable"), changed)
+    }
+
+    /// `java.toURL(url)` 必须给出 origin / pathname / host（95 个源在用）。
+    ///
+    /// 非法地址要抛错 —— 源写 `try{ host = java.toURL(host,"").origin }
+    /// catch(e){ 提示不是有效链接 }`，返回空对象会让它误判成合法。
+    func testToURLShape() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(
+            engine.evaluateString(#"java.toURL("https://a.com/x/y?q=1","").origin"#),
+            "https://a.com"
+        )
+        XCTAssertEqual(
+            engine.evaluateString(#"java.toURL("https://a.com/x/y?q=1","").pathname"#),
+            "/x/y"
+        )
+        // 非法地址：catch 分支必须能命中
+        XCTAssertEqual(
+            engine.evaluateString(#"var r; try { java.toURL("!!!","").origin; r = "ok" } catch(e) { r = "bad" } r"#),
+            "bad"
+        )
+    }
+
+    /// `java.aJax(url)` / `java.postForm(url, body)` 返回**响应体文本**而不是响应对象。
+    ///
+    /// 源写 `JSON.parse(java.aJax(url))`，给对象就会 "Unexpected token o"。
+    func testAjaxTextReturningApisAreStrings() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof java.aJax"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof java.postForm"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof java.fetch"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof java.toString"), "function")
+    }
+
+    /// 书籍级字段必须注入（880 个源读 book.durChapterIndex）。
+    func testBookProgressFieldsAreInjected() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof book.durChapterIndex"), "number")
+        XCTAssertEqual(engine.evaluateString("typeof book.totalChapterNum"), "number")
+        XCTAssertEqual(engine.evaluateString("typeof book.durChapterTitle"), "string")
+        XCTAssertEqual(engine.evaluateString("typeof book.canUpdate"), "boolean")
+        XCTAssertEqual(engine.evaluateString("typeof chapter.putImgUrl"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof book.putCustomVariable"), "function")
+        XCTAssertEqual(engine.evaluateString("typeof book.setUseReplaceRule"), "function")
+    }
+
+    /// `book.readConfig` 不能是 undefined：148 个源写
+    /// `book.readConfig == null || book.readConfig.useReplaceRule == null`。
+    func testBookReadConfigIsObject() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof book.readConfig"), "object")
+        XCTAssertEqual(engine.evaluateString("book.readConfig.useReplaceRule"), "true")
+    }
+
+    /// `cookie.mapToCookie(cookieHeader)` 要能吃下多组键值对。
+    ///
+    /// 16 个源把响应里的 set-cookie 整串丢进来做登录回写。
+    func testCookieMapToCookieParsesMultiplePairs() {
+        XCTAssertEqual(CookieJar.splitPairs("a=1; b=2; Path=/; HttpOnly").count, 2)
+        XCTAssertEqual(CookieJar.splitPairs("a=1, b=2").count, 2)
+        // Expires 里的日期逗号不能被当成分组分隔
+        XCTAssertEqual(
+            CookieJar.splitPairs("sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT").count,
+            1
+        )
+    }
+
+    /// 书籍上下文要能注入到书源引擎（目录规模 / 阅读进度）。
+    func testSourceEngineBookContextInjection() {
+        let dict: [String: Any] = [
+            "bookSourceName": "测试源",
+            "bookSourceUrl": "https://a.com",
+            "bookSourceType": 0,
+            "ruleSearch": ["bookList": "$.list[*]", "name": "$.name", "bookUrl": "$.url"]
+        ]
+        let source = BookSource(dict: dict)
+        let engine = SourceEngine(source: source)
+        var context = engine.bookContext
+        context.totalChapterNum = 1234
+        context.durChapterIndex = 56
+        context.durChapterTitle = "第五十七章"
+        engine.bookContext = context
+        XCTAssertEqual(engine.bookContext.totalChapterNum, 1234)
+        XCTAssertEqual(engine.bookContext.durChapterIndex, 56)
+    }
+
+    /// 刷新类 API 只登记、不在求值内部重入。
+    func testRefreshRequestIsDeferred() {
+        let dict: [String: Any] = [
+            "bookSourceName": "测试源",
+            "bookSourceUrl": "https://a.com",
+            "bookSourceType": 0,
+            "ruleSearch": ["bookList": "$.list[*]", "name": "$.name", "bookUrl": "$.url"]
+        ]
+        let source = BookSource(dict: dict)
+        let engine = SourceEngine(source: source)
+        XCTAssertTrue(engine.consumePendingRefresh().isEmpty)
+        engine.registerPendingRefreshForTesting("refreshTocUrl")
+        XCTAssertEqual(engine.consumePendingRefresh(), ["toc"])
+        // 取走即清空：不会反复触发
+        XCTAssertTrue(engine.consumePendingRefresh().isEmpty)
+    }
+
+    /// 书源声明里的标量字段要能被脚本直接读到（82 + 59 + 44 个源依赖）。
+    ///
+    /// 源里写 `source.bookSourceType == '3'` / `timeFormat(source.lastUpdateTime)`
+    /// 这类按**原文**比较的判断，归一化后的 typed 值对不上，
+    /// 因此必须原样透传一份。
+    func testSourceMetaIsExposedToScripts() {
+        let dict: [String: Any] = [
+            "bookSourceName": "测试源",
+            "bookSourceUrl": "https://a.com",
+            "bookSourceType": 0,
+            "lastUpdateTime": 1745825537477,
+            "respondTime": 4475,
+            "bookSourceGroup": "分组A",
+            "enabledCookieJar": true,
+            "ruleSearch": ["bookList": "$.list[*]"]
+        ]
+        let source = BookSource(dict: dict)
+        let engine = SourceEngine(source: source)
+
+        XCTAssertEqual(engine.evaluateScript("String(source.lastUpdateTime)"), "1745825537477")
+        XCTAssertEqual(engine.evaluateScript("String(source.respondTime)"), "4475")
+        XCTAssertEqual(engine.evaluateScript("String(source.bookSourceGroup)"), "分组A")
+        XCTAssertEqual(engine.evaluateScript("typeof source.enabledCookieJar"), "boolean")
+        // 规则字典不进 meta：体积是其余字段的上百倍，脚本也不会读
+        XCTAssertEqual(engine.evaluateScript("typeof source.ruleSearch"), "undefined")
+    }
+
+    /// `book.order` 必须在：源写 `if (book && book.order != 0 && …)`，
+    /// 缺失时 undefined != 0 恒为 true，走进「不在书架」的分支。
+    func testBookOrderIsInjected() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("typeof book.order"), "number")
+        XCTAssertEqual(engine.evaluateString("String(book.order)"), "0")
+    }
+
 }

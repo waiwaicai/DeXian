@@ -217,6 +217,24 @@ struct BookSource: Codable, Hashable, Identifiable {
     var childSources: [BookSource]
     var isCustom: Bool
     var bookSourceTypeRaw: Int
+    /// 书源声明里的**标量字段**原样保留（供脚本直接读取）。
+    ///
+    /// 书源经常读自己声明里的字段做分支：
+    /// `source.bookSourceType == '3'`（82 个源）、
+    /// `timeFormat(source.lastUpdateTime)`（59 个源）、
+    /// `String(source.exploreUrl).match(/let banben=.../)`（44 个源）。
+    /// 上面那些 typed 属性是宿主**归一化后**的值（例如 exploreUrl 会被拆成分类列表、
+    /// lastUpdateTime 会被转成 Int），脚本按原文比较时对不上；
+    /// 而除此之外的字段（respondTime / bookSourceGroup / loginUi …）根本没被保留。
+    ///
+    /// 这里只留**标量**，规则字典（ruleSearch 等几十 KB）与 childSources 一律排除 ——
+    /// 上千个源各存一份完整声明会把存储和内存都翻几倍，
+    /// 而脚本从不会去读 `source.ruleSearch`。
+    ///
+    /// 可选类型：本工程的书源是 Codable 直存，合成出来的 `init(from:)`
+    /// **不会**为缺省值兜底。写成非可选会让**已落盘的旧数据解码失败** ——
+    /// 用户升级后整份书源列表直接清空，比缺字段严重得多。
+    var metaJSON: String?
 
     init(dict: [String: Any]) {
         let urlValue = dict.str("bookSourceUrl", "bookSourceURL", "sourceUrl", "url", "baseUrl", "host") ?? ""
@@ -261,6 +279,53 @@ struct BookSource: Codable, Hashable, Identifiable {
             .map { BookSource(dict: $0) }
         isCustom = dict.bool("isCustom", "custom")
         bookSourceTypeRaw = dict.int("bookSourceType", "type", "sourceType") ?? 0
+        metaJSON = Self.scalarMeta(dict)
+    }
+
+    /// 抽出书源声明里的标量字段（字符串 / 数字 / 布尔）并序列化成 JSON 文本。
+    ///
+    /// 排除项：
+    /// - 规则字典（ruleSearch / ruleToc / ruleBookInfo / ruleContent / ruleExplore …）：
+    ///   体积是其余字段的上百倍，且脚本从不读 `source.ruleSearch`。
+    /// - 分类树 / 子书源：递归结构，序列化开销大。
+    /// - 超长字符串（> 8KB）：多数是内联大段脚本，已由 typed 属性承载。
+    private static func scalarMeta(_ dict: [String: Any]) -> String {
+        let excludedKeys: Set<String> = [
+            "ruleSearch", "searchRule", "rule_search", "search",
+            "ruleToc", "tocRule", "rule_toc", "toc", "catalog",
+            "ruleBookInfo", "bookInfoRule", "rule_book_info", "bookInfo",
+            "ruleContent", "contentRule", "rule_content", "content",
+            "ruleExplore", "exploreRule", "rule_explore", "explore",
+            "categories", "category", "exploreCategories", "catList",
+            "childSources", "children", "subSources", "subSourcesList"
+        ]
+        var output: [String: Any] = [:]
+        for (key, value) in dict {
+            if excludedKeys.contains(key) { continue }
+            // NSNull / 嵌套容器一律跳过：前者序列化会抛错，
+            // 后者（数组 / 字典）要么已在排除表里，要么不是脚本读的标量。
+            if let text = value as? String {
+                if text.count > 8192 { continue }
+                output[key] = text
+            } else if let number = value as? NSNumber {
+                // 必须用 CFBooleanGetTypeID 区分真假布尔：
+                // JSON 解析出来的 `true` 是 __NSCFBoolean，它也是 NSNumber，
+                // 直接当数字存会把 true/false 写成 1/0，源里 `=== true` 对不上。
+                // 反过来说，时间戳这类大整数若被当成 Bool 就会变成 1，
+                // 用类型 ID 判断两个方向都不会错。
+                if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                    output[key] = number.boolValue
+                } else {
+                    output[key] = number
+                }
+            } else if let flag = value as? Bool {
+                output[key] = flag
+            }
+        }
+        guard !output.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: output),
+              let text = String(data: data, encoding: .utf8) else { return "" }
+        return text
     }
 
     /// 搜索地址：优先 searchUrl，其次 ruleSearch 里的 url 字段。

@@ -46,6 +46,115 @@ final class SourceEngine {
     var onRefreshExplore: (() -> Void)?
     var onToast: ((String) -> Void)?
 
+    /// 兼容层新增的宿主回调（由阅读页 / 发现页注入）。
+    ///
+    /// - onRefreshRequest：脚本调用 refreshTocUrl / refreshBookUrl /
+    ///   refreshContent 等刷新类 API 时通知界面重新拉取（733 个源在用）。
+    /// - onLoginInfoChanged：upLoginData / putLoginInfo 保存登录信息。
+    /// - onRequestLogin：脚本要求弹出登录 / 验证界面。
+    /// - onOpenVideo：openVideoPlayer 把视频直链交给播放器。
+    /// - onAddBook：java.addBook(url) 跳转书籍。
+    /// - onClipboard：java.setClipboard(text) 写剪贴板（诊断用）。
+    /// - onReverseTocChanged：book.setReverseToc(bool) 切换目录正反序。
+    /// - onBookTypeChanged：book.setType(int) 影视源改书籍类型。
+    var onRefreshRequest: ((String) -> Void)?
+    var onLoginInfoChanged: (([String: String]) -> Void)?
+    var onRequestLogin: (() -> Void)?
+    var onOpenVideo: ((String, String) -> Void)?
+    var onAddBook: ((String) -> Void)?
+    var onClipboard: ((String) -> Void)?
+    var onReverseTocChanged: ((Bool) -> Void)?
+    var onBookTypeChanged: ((Int) -> Void)?
+
+    /// 书源登录信息（脚本 putLoginInfo / upLoginData 写入）。
+    private(set) var sourceLoginInfo: [String: String] = [:]
+
+    /// 脚本请求「重新拉取」的标记。
+    ///
+    /// `java.refreshTocUrl()` / `refreshBookUrl()` / `refreshContent()` 的语义是
+    /// 「当前缓存已失效，下次请重新请求」。这些调用发生在 JS 求值**内部**，
+    /// 此时直接发起新请求会重入求值（同一次阅读里目录规则自己再触发一次目录请求），
+    /// 实测就是「刷目录时卡住然后闪退」。
+    /// 因此这里只登记，由调用方在本次操作结束后取走执行。
+    private let refreshLock = NSLock()
+    private var pendingRefreshNames: Set<String> = []
+
+    /// 非空表示脚本要求刷新对应资源（"toc" / "book" / "content" / "info"）。
+    func consumePendingRefresh() -> Set<String> {
+        refreshLock.lock(); defer { refreshLock.unlock() }
+        let value = pendingRefreshNames
+        pendingRefreshNames = []
+        return value
+    }
+
+    private func markPendingRefresh(_ name: String) {
+        refreshLock.lock()
+        pendingRefreshNames.insert(Self.refreshCategory(name))
+        refreshLock.unlock()
+    }
+
+    /// 把 API 名归一成资源类别。
+    private static func refreshCategory(_ name: String) -> String {
+        let lowered = name.lowercased()
+        if lowered.contains("toc") { return "toc" }
+        if lowered.contains("content") { return "content" }
+        if lowered.contains("info") { return "info" }
+        if lowered.contains("book") { return "book" }
+        return "all"
+    }
+
+    /// 测试入口：把一次刷新请求登记进待办（生产路径由 onRefreshRequest 触发）。
+    func registerPendingRefreshForTesting(_ name: String) {
+        markPendingRefresh(name)
+    }
+
+    /// 测试入口：在完整的宿主环境里求值一段脚本，返回其字符串结果。
+    ///
+    /// 生产路径不存在「只求值一段脚本」的调用（规则都经 AnalyzeRule），
+    /// 因此单独开这个口子给单元测试验证 source.* / book.* 的注入是否到位。
+    func evaluateScript(_ script: String) -> String {
+        makeJSEngine(content: nil, bookInfo: [:], chapterInfo: [:], title: "")
+            .evaluateString(script)
+    }
+
+
+    /// 书籍级上下文（目录规模 / 阅读进度 / 书籍类型）。
+    ///
+    /// 书源脚本会读 `book.durChapterIndex`（880 个源）、
+    /// `book.totalChapterNum`（619 个源）、`book.canUpdate`（362 个源）
+    /// 来判断「这一章是不是当前在读章」「是不是最后一章」。
+    /// 不注入时它们是 undefined：`chapter.index == undefined` 恒为 false，
+    /// 依赖这个判断的正文分支整段走空 —— 表现是「打开显示几个字 / 显示一半」。
+    struct BookContext {
+        var url: String = ""
+        var type: Int = 0
+        var durChapterIndex: Int = 0
+        var durChapterTitle: String = ""
+        var totalChapterNum: Int = 0
+        var canUpdate: Bool = true
+        var customIntro: String = ""
+        var latestChapterTitle: String = ""
+        var status: String = ""
+        var reverseToc: Bool = false
+        /// 书架序号（Legado 的 book.order）：0 表示不在书架/未分组。
+        var order: Int = 0
+    }
+
+    private let bookContextLock = NSLock()
+    private var storedBookContext = BookContext()
+
+    var bookContext: BookContext {
+        get {
+            bookContextLock.lock(); defer { bookContextLock.unlock() }
+            return storedBookContext
+        }
+        set {
+            bookContextLock.lock()
+            storedBookContext = newValue
+            bookContextLock.unlock()
+        }
+    }
+
     /// 视频书源解析出的直链缓存。
     ///
     /// 与音频分开持有：同一本书可能同时挂着音频源与影视源，
@@ -814,7 +923,13 @@ final class SourceEngine {
         if let check = source.loginCheckJs.nilIfBlank {
             js.host.document = HTMLParser.parse(response.text)
             js.src = response.text
-            _ = js.evaluate(check)
+            // 登录检查脚本的 result 是响应对象（对齐 Legado 的
+            // evalJS(loginCheckJs, strResponse)）。脚本据此调
+            // result.body() / result.code() / result.url() 判断限频与验证页。
+            // 不注入时这些调用全是 "null is not an object"，
+            // 该弹出的验证窗口永远不弹。
+            js.lastResponse = response
+            _ = js.evaluateLoginCheck(check, response: response)
         }
         return response.text
     }
@@ -851,10 +966,14 @@ final class SourceEngine {
             base: baseForResolving(parsed.url, fallback: source.url)
         )
 
+        // 记住最后一次响应：java.getResponse() / java.redirectUrl /
+        // java.getHeaderMap() 都要读它（11 个源 + 57 处）。
+        js.lastResponse = response
+
         if let check = source.loginCheckJs.nilIfBlank {
             js.host.document = HTMLParser.parse(response.text)
             js.src = response.text
-            _ = js.evaluate(check)
+            _ = js.evaluateLoginCheck(check, response: response)
         }
         return response
     }
@@ -888,6 +1007,37 @@ final class SourceEngine {
         host.variables = variables
         host.document = content as? HTMLNode
 
+        // 书籍级上下文：书源据此判断进度与目录规模
+        let context = bookContext
+        host.bookUrl = context.url.isEmpty ? (bookInfo["bookUrl"] ?? "") : context.url
+        host.bookType = context.type
+        host.totalChapterNum = context.totalChapterNum
+        host.canUpdate = context.canUpdate
+        host.customIntro = context.customIntro
+        host.latestChapterTitle = context.latestChapterTitle
+        host.bookStatus = context.status
+        host.reverseToc = context.reverseToc
+        // 进度字段：调用方传进来的 chapterInfo 优先（求某一章时就是那一章），
+        // 否则用书架的「上次读到哪儿」。
+        if let raw = chapterInfo["index"], let value = Int(raw) {
+            host.durChapterIndex = value
+        } else {
+            host.durChapterIndex = context.durChapterIndex
+        }
+        host.durChapterTitle = chapterInfo["title"] ?? context.durChapterTitle
+
+        // 书源声明原样透传给脚本。
+        //
+        // 源里写 `source.bookSourceType == '3'` / `String(source.exploreUrl).match(…)`
+        // 这类**按原文比较**的判断，归一化后的 typed 值对不上。
+        // 解析失败（旧数据没有这一列）时留空字典，行为与改动前一致。
+        if let metaJSON = source.metaJSON, !metaJSON.isEmpty,
+           let data = metaJSON.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            host.sourceMeta = parsed
+        }
+        host.bookOrder = context.order
+
         let js = JSEngine(host: host)
         js.src = (content as? String) ?? ""
 
@@ -912,6 +1062,43 @@ final class SourceEngine {
         js.onSearchBook = { [weak self] keyword in self?.onSearchBook?(keyword) }
         js.onRefreshExplore = { [weak self] in self?.onRefreshExplore?() }
         js.onToast = { [weak self] text in self?.onToast?(text) }
+
+        // 兼容层新增的宿主钩子。
+        //
+        // 这些 API（refreshTocUrl / upLoginData / openVideoPlayer / …）
+        // 光「注册成不报错的空实现」只解决「脚本不中断」，
+        // 真正的语义（刷新目录、保存登录信息、播放视频）必须落到宿主，
+        // 否则用户看到的是「点了没反应」。
+        js.onRefreshRequest = { [weak self] name in
+            guard let self else { return }
+            // 先登记，避免在 JS 求值内部重入网络请求；
+            // 调用方在本次操作结束后用 consumePendingRefresh() 取走执行。
+            self.markPendingRefresh(name)
+            self.onRefreshRequest?(name)
+        }
+        js.onLoginInfoChanged = { [weak self] info in
+            guard let self, !info.isEmpty else { return }
+            self.sourceLoginInfo = info
+            self.onLoginInfoChanged?(info)
+        }
+        js.onRequestLogin = { [weak self] in
+            self?.onRequestLogin?()
+        }
+        js.onOpenVideo = { [weak self] url, title in
+            self?.onOpenVideo?(url, title)
+        }
+        js.host.onAddBook = { [weak self] url in
+            self?.onAddBook?(url)
+        }
+        js.host.onClipboard = { [weak self] text in
+            self?.onClipboard?(text)
+        }
+        js.host.onReverseTocChanged = { [weak self] flag in
+            self?.onReverseTocChanged?(flag)
+        }
+        js.host.onBookTypeChanged = { [weak self] type in
+            self?.onBookTypeChanged?(type)
+        }
 
         // 让 java.getString / java.setContent 回到规则引擎
         js.host.resolveString = { [weak js] rule, target, _ in

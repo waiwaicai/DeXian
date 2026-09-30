@@ -52,6 +52,19 @@ final class ReaderViewModel: ObservableObject {
         self.book = book
         self.shelf = shelf
         engine = source.map { SourceEngine(source: $0, variables: book.variable) }
+        engine?.bookContext = SourceEngine.BookContext(
+            url: book.bookUrl,
+            type: book.type.rawValue,
+            durChapterIndex: book.lastReadChapterIndex,
+            durChapterTitle: book.lastReadChapterTitle ?? "",
+            totalChapterNum: book.totalChapterCount,
+            canUpdate: book.canUpdate,
+            customIntro: "",
+            latestChapterTitle: book.latestChapterTitle ?? "",
+            status: "",
+            reverseToc: false,
+            order: book.groupId == nil ? 0 : 1
+        )
         chapters = book.chapters
         currentIndex = book.lastReadChapterIndex
         cachedChapterCount = ChapterCache.shared.counts(bookId: book.id).cached
@@ -116,9 +129,18 @@ final class ReaderViewModel: ObservableObject {
         }
         state = .loading
         do {
-            let list = try await engine.toc(tocUrl: tocUrlForLoading, bookInfo: bookInfoMap)
+            var list = try await engine.toc(tocUrl: tocUrlForLoading, bookInfo: bookInfoMap)
+            // 脚本调了 java.refreshTocUrl()：它刚刚改掉了目录地址（常见于
+            // 「切换线路 / 登录后重取」），需要按新地址再取一次。
+            // 只重试一次，避免源写错时无限循环。
+            if engine.consumePendingRefresh().contains("toc"), list.isEmpty {
+                list = (try? await engine.toc(tocUrl: tocUrlForLoading, bookInfo: bookInfoMap)) ?? list
+            }
             chapters = list
             state = .loaded
+            // 目录到手后刷新书籍上下文：后续正文求值时
+            // book.totalChapterNum / book.durChapterIndex 才有正确值。
+            syncBookContext()
             shelf.updateChapters(bookId: book.id, chapters: list)
             shelf.updateVariables(bookId: book.id, variables: engine.variableSnapshot)
         } catch {
@@ -229,11 +251,35 @@ final class ReaderViewModel: ObservableObject {
         ]
     }
 
+    /// 把「当前阅读位置 + 目录规模」同步给书源引擎。
+    ///
+    /// 书源脚本大量依赖 `book.durChapterIndex`（880 个源 / 1270 处）、
+    /// `book.durChapterTitle`（488 个源）、`book.totalChapterNum`（619 个源）。
+    /// 这些值不刷新的话，翻到第 N 章时脚本还以为在第 1 章：
+    /// 免购买判断失效、章节跳转错位、目录倒序判断失效。
+    private func syncBookContext() {
+        guard let engine else { return }
+        var context = engine.bookContext
+        context.url = book.bookUrl
+        context.type = book.type.rawValue
+        context.totalChapterNum = chapters.isEmpty ? book.totalChapterCount : chapters.count
+        context.durChapterIndex = chapters.indices.contains(currentIndex)
+            ? (chapters[currentIndex].index >= 0 ? chapters[currentIndex].index : currentIndex)
+            : currentIndex
+        context.durChapterTitle = currentChapter?.title ?? (book.lastReadChapterTitle ?? "")
+        context.latestChapterTitle = chapters.last?.title ?? (book.latestChapterTitle ?? "")
+        context.canUpdate = book.canUpdate
+        engine.bookContext = context
+    }
+
     // MARK: 内容
 
     func loadContent(index: Int) async {
         guard chapters.indices.contains(index) else { return }
         currentIndex = index
+        // 换章即刷新书籍上下文：book.durChapterIndex / book.durChapterTitle
+        // 必须指向**当前这一章**，书源据此判断 VIP / 购买 / 跳转。
+        syncBookContext()
 
         // 音频书源没有正文，改为解析音频直链
         if book.type == .audio {
@@ -346,6 +392,7 @@ final class ReaderViewModel: ObservableObject {
     func loadAudio() async {
         guard let engine, let chapter = currentChapter else { return }
         for (key, value) in book.variable { engine.variables[key] = value }
+        syncBookContext()
         isLoadingContent = true
         // 先清空，避免加载途中误播上一章的音频
         audioUrl = ""
@@ -388,6 +435,7 @@ final class ReaderViewModel: ObservableObject {
 
         guard let engine, let chapter = currentChapter else { return }
         for (key, value) in book.variable { engine.variables[key] = value }
+        syncBookContext()
         isLoadingContent = true
         // 先清空，避免加载途中误播上一集
         videoUrl = ""

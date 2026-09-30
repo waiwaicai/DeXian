@@ -54,6 +54,33 @@ enum RuleSyntax {
         var quote: Character?
         var index = 0
 
+        // 开头的规则标志不是链分隔符。
+        //
+        // Legado 在 SourceRule 初始化时就把它们剥离了：`@@` 走 substring(2)，
+        // `@js:` 被 JS_PATTERN 整体吃掉；AnalyzeRule.trim() 也会跳过开头的 '@'。
+        // 旧实现把开头的 '@' 当成链分隔符，于是
+        //     `@js: …脚本…`
+        // 被切成 ["", "js: …脚本…"]：第一段是空规则，求值成 .strings([])，
+        // 这个**空数组**又被当作 result 交给脚本 —— 脚本里 `result.match(…)`
+        // 于是报 "result.match is not a function"，或拿到空值直接失败，
+        // 整条规则作废。正文规则一旦这么写，表现就是
+        // 「小说连文字都看不到」。
+        //
+        // 实测 3460 个源里有 1332 条规则踩中，其中 995 条是 `@js:` 开头。
+        var markerPrefixLength = 0
+        if characters.first == "@" {
+            let rest = String(characters[1...])
+            let loweredRest = rest.lowercased()
+            if characters.count > 1, characters[1] == "@" {
+                // `@@css选择器`：两个 '@' 都属于标志，不能吞
+                markerPrefixLength = 2
+            } else if ["js:", "css:", "xpath:", "json:", "regex:", "get:", "put:"]
+                .contains(where: { loweredRest.hasPrefix($0) }) {
+                // `@js:` / `@css:` 等显式标志，必须原样保留给 detectKind
+                markerPrefixLength = 1
+            }
+        }
+
         while index < characters.count {
             let character = characters[index]
 
@@ -95,7 +122,7 @@ enum RuleSyntax {
                     continue
                 }
             }
-            if depth == 0, character == "@" {
+            if depth == 0, index >= markerPrefixLength, character == "@" {
                 let rest = String(characters[(index + 1)...])
                 if isChainSeparator(rest) {
                     segments.append(current)

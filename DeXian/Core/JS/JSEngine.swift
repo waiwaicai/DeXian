@@ -38,6 +38,41 @@ final class JSEngine {
         var title: String = ""
         /// 跨步骤共享的书籍级变量
         var variables = VariableStore()
+        /// 书籍地址 / 类型 / 阅读进度。
+        ///
+        /// 书源脚本直接读 `book.durChapterIndex`（880 个源）、
+        /// `book.totalChapterNum`（619 个源）、`book.canUpdate`（362 个源），
+        /// 拿它们做「当前章是否 VIP」「目录是否刷新」这类判断，
+        /// 缺失时是 undefined 参与比较 —— 判断恒为 false，正文整段取不到。
+        var bookUrl: String = ""
+        var bookType: Int = 0
+        var durChapterIndex: Int = 0
+        var durChapterTitle: String = ""
+        var totalChapterNum: Int = 0
+        var canUpdate: Bool = true
+        var customIntro: String = ""
+        var latestChapterTitle: String = ""
+        var bookStatus: String = ""
+        var reverseToc: Bool = false
+        var useReplaceRule: Bool = true
+        /// 书源元信息的**全量**透传。
+        ///
+        /// 书源脚本直接读自己声明里的字段：
+        /// `if (source.bookSourceType == '3')`（82 个源）、
+        /// `timeFormat(source.lastUpdateTime)`（59 个源）、
+        /// `String(source.exploreUrl).match(/let banben=.../)`（44 个源）、
+        /// `source.ruleExplore.author`（13 个源）。
+        /// 逐个硬编码既写不全、也会随书源格式演进而失效，
+        /// 因此这里整体透传，缺什么补什么。
+        var sourceMeta: [String: Any] = [:]
+        /// 书架序号（Legado 的 book.order）：源写
+        /// `if (book && book.order != 0 && reading == '1')` 决定走不走书架同步分支。
+        var bookOrder: Int = 0
+        /// 脚本要求「把这本书加进书架 / 重新登录 / 写剪贴板」时回调宿主。
+        var onAddBook: ((String) -> Void)?
+        var onClipboard: ((String) -> Void)?
+        var onBookTypeChanged: ((Int) -> Void)?
+        var onReverseTocChanged: ((Bool) -> Void)?
     }
 
     let context: JSContext?
@@ -48,15 +83,29 @@ final class JSEngine {
     /// 由 SourceEngine 在构造时注入、求值后取回并落盘，因此不能是 private：
     /// 表单型发现源「切换频道 / 切换接口」正是靠它跨次保留选择。
     var sourceVariable: String = ""
-    private var loginHeader: String?
-    private var loginInfo: [String: String] = [:]
-    private var cache: [String: String] = [:]
+    /// 登录相关状态与规则级缓存。
+    ///
+    /// 这三个**不是 private**：JSEngineCompat.swift 里的兼容层需要读写它们
+    /// （java.upLoginData 落账号、java.importScript / cacheFile 做缓存）。
+    /// Swift 的 private 是文件级作用域，跨文件访问会被编译器拒绝。
+    var loginHeader: String?
+    var loginInfo: [String: String] = [:]
+    var cache: [String: String] = [:]
 
     var host: Host
     var key: String = ""
     var page: Int = 1
     var result: Any?
     var src: String = ""
+
+    /// 普通 UA 与 WebView UA。
+    ///
+    /// 书源用 `java.getUserAgent() === java.getWebViewUA()` 判断自己是否
+    /// 跑在「源阅」上（实测 14 个源），两者必须**不同**，否则会走错分支。
+    /// 这里让 WebView UA 带上机型后缀，与 getUserAgent 明确区分开。
+    static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    static let webViewUserAgent = userAgent + " DeXian/1.0"
 
     /// 最近一次求值触发的未捕获异常原文（由 `context.exceptionHandler` 写入）。
     ///
@@ -121,8 +170,53 @@ final class JSEngine {
     /// 脚本调用 `java.toast / longToast` 时的用户提示。
     var onToast: ((String) -> Void)?
 
+    /// 脚本调用 `java.upLoginData(...)` / `source.putLoginInfo(...)` 时，
+    /// 把新的登录信息交回宿主落盘。
+    ///
+    /// 实测 75 个源依赖它做「登录后保存账号」，其中晋江 / 起点 / 哔哩哔哩
+    /// 等 9 个源把它写在登录流程的收尾处。缺失时是
+    /// `undefined is not a function`，整段登录脚本中断 ——
+    /// 用户看到的是「授权码/账号明明填对了，还提示未登录」。
+    var onLoginInfoChanged: (([String: String]) -> Void)?
+
+    /// 脚本调用 `java.upLoginData(无参)` / `source.login()` 时要求弹出登录界面。
+    var onRequestLogin: (() -> Void)?
+
+    /// 脚本调用 `java.refreshTocUrl()` / `refreshBookUrl()` / `refreshBookInfo()` /
+    /// `refreshContent()` / `reGetBook()` / `refreshBookToc()` 等刷新类 API 时的通知。
+    ///
+    /// 实测 733 个源调用 `refreshTocUrl`，212 个源调用 `refreshBookUrl`。
+    /// 这些 API 的语义是「目录地址/书籍地址已变，请重新拉取」；
+    /// 缺了就是 `undefined is not a function`，切换线路后目录永远刷不出来。
+    var onRefreshRequest: ((String) -> Void)?
+
+    /// 本次求值对应的响应对象（供 `java.getResponse()` / `java.getHeaderMap()` 读取）。
+    ///
+    /// 只在单次求值期间有效，由宿主在拿到响应后注入、求值结束后清空。
+    var lastResponse: HTTPResponse?
+
+    /// 脚本调用 `java.openVideoPlayer(url, title, float)` 时把直链交回界面播放。
+    var onOpenVideo: ((String, String) -> Void)?
+
     /// 脚本调用 `source.setVariable(...)` 时把新值交给宿主持久化。
     var onVariableChanged: ((String) -> Void)?
+
+    /// 书籍级可变状态。
+    ///
+    /// 脚本会**写** `book.bookUrl` / `book.customIntro` / `book.type`，
+    /// 宿主求值结束后需要把这些改动取回落盘（否则「改书名」「改地址」
+    /// 这类操作只在本次求值内有效）。
+    var bookMutation: BookMutation = BookMutation()
+
+    /// 书籍级可变字段的回写载体。
+    struct BookMutation {
+        var bookUrl: String?
+        var customIntro: String?
+        var type: Int?
+        var reverseToc: Bool?
+        var canUpdate: Bool?
+        var variable: String?
+    }
 
     /// 在 JS 求值内部同步等待用户完成网页操作（验证码 / 登录）。
     ///
@@ -132,22 +226,30 @@ final class JSEngine {
         return awaitUserAction(url, title)
     }
 
-    func evaluate(_ script: String) -> Any? {
+    /// 求值脚本。
+    ///
+    /// `resultOverride` 仅对**本次**求值生效，用于 loginCheckJs ——
+    /// 那种脚本里的 `result` 是**响应对象**而不是规则链上一步的值
+    /// （对齐 Legado 的 `evalJS(loginCheckJs, strResponse)`）。
+    /// 用参数传递而非成员变量：脚本内部还会调 java.getString 之类重入求值，
+    /// 成员变量会被那些嵌套求值误消费，参数则天然只作用于当前这一次。
+    func evaluate(_ script: String, resultOverride: JSValue? = nil) -> Any? {
         // 已在专用线程上（脚本回调重入）：直接求值，避免对同一队列 sync 死锁
         if DispatchQueue.getSpecific(key: JSEngine.evaluationQueueKey) != nil {
-            return evaluateOnQueue(script)
+            return evaluateOnQueue(script, resultOverride: resultOverride)
         }
         var output: Any?
         JSEngine.evaluationQueue.sync {
-            output = evaluateOnQueue(script)
+            output = evaluateOnQueue(script, resultOverride: resultOverride)
         }
         return output
     }
 
-    private func evaluateOnQueue(_ script: String) -> Any? {
+    private func evaluateOnQueue(_ script: String, resultOverride: JSValue? = nil) -> Any? {
         lock.lock()
         defer { lock.unlock() }
         guard let context else { return nil }
+        let injectedResult = resultOverride
 
         // 每次求值都在独立的 autorelease pool 里跑。
         //
@@ -174,7 +276,11 @@ final class JSEngine {
             // result 可能是 HTMLNode（pure Swift class）或含它的容器：
             // 直接交给 JavaScriptCore 会在 ObjC 桥接层反射它的内存布局，
             // 触发 Swift 运行时陷阱（SIGABRT）。必须先净化为 JSC 认识的形态。
-            context.setObject(bridgeForInjection(result), forKeyedSubscript: "result" as NSString)
+            if let injectedResult {
+                context.setObject(injectedResult, forKeyedSubscript: "result" as NSString)
+            } else {
+                context.setObject(bridgeForInjection(result), forKeyedSubscript: "result" as NSString)
+            }
 
             // 脚本一律包进一个块再求值。
             //
@@ -431,6 +537,16 @@ final class JSEngine {
         RuleUtil.asString(evaluate(script)) ?? ""
     }
 
+    /// 求值一次登录检查脚本：脚本里的 `result` 是**响应对象**。
+    ///
+    /// 对齐 Legado 的 `evalJS(loginCheckJs, strResponse)`。
+    /// 书源据此判断限频 / 验证页（实测 33 个源带 loginCheckJs，
+    /// 其中 12 个会在此弹人机验证窗口）。
+    func evaluateLoginCheck(_ script: String, response: HTTPResponse) -> Any? {
+        guard let context else { return nil }
+        return evaluate(script, resultOverride: makeResponseObject(response, context: context))
+    }
+
     /// 规则引擎读写书籍级变量
     func variable(named name: String) -> String? {
         host.variables[name]
@@ -493,6 +609,7 @@ final class JSEngine {
         // 再注入 JS 兼容层 —— 兼容层里的 Packages、CryptoJS、$
         // 都要引用 java.* 与 __dx.* 上的方法，顺序不能反。
         installExtendedJava()
+        installCompatJava()
         JSRuntimeBootstrap.install(into: context)
         _ = context.evaluateScript("var console = { log: function(){ java.log(Array.prototype.join.call(arguments,' ')) } };")
     }
@@ -720,10 +837,16 @@ final class JSEngine {
         java.setObject(toast, forKeyedSubscript: "longToast" as NSString)
 
         let getUserAgent: @convention(block) () -> String = {
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+            JSEngine.userAgent
         }
         java.setObject(getUserAgent, forKeyedSubscript: "getUserAgent" as NSString)
-        java.setObject(getUserAgent, forKeyedSubscript: "getWebViewUA" as NSString)
+
+        // getWebViewUA 必须与 getUserAgent **不同**：
+        // 14 个源用二者的相等性判断自己是否跑在「源阅」上。
+        let getWebViewUA: @convention(block) () -> String = {
+            JSEngine.webViewUserAgent
+        }
+        java.setObject(getWebViewUA, forKeyedSubscript: "getWebViewUA" as NSString)
 
         // java.refreshExplore()：表单控件变化后要求发现页重新求值。
         // 实测 51 处（21 个源）。空实现时「切换频道 / 切换接口」点下去
@@ -733,7 +856,25 @@ final class JSEngine {
         }
         java.setObject(refreshExplore, forKeyedSubscript: "refreshExplore" as NSString)
 
-        java.setObject(host.baseUrl, forKeyedSubscript: "url" as NSString)
+        // java.url 必须是**实时**的当前地址：脚本读它拼下一页 / 目录地址，
+        // setup 时快照会让它永远停在书源入口域名。
+        //
+        // 闭包一律只弱持有 self，**不能**捕获 context：
+        // getter 会挂在 java 上、java 又挂在 context 上，
+        // 强引用 context 就构成 context → java → getter → context 的自环，
+        // 每建一个 JSEngine 就漏掉一整个 JSVirtualMachine
+        // （搜索几百个源就是几百个虚拟机，正是闪退的主因）。
+        JSEngine.defineProperty("url", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.host.baseUrl, in: context)
+            },
+            set: { [weak self] value in
+                let text = JSEngine.stringFrom(value)
+                if !text.isEmpty { self?.host.baseUrl = text }
+            },
+            in: context
+        ), on: java, in: context)
         java.setObject(host.headers, forKeyedSubscript: "headerMap" as NSString)
 
         context.setObject(java, forKeyedSubscript: "java" as NSString)
@@ -883,6 +1024,107 @@ final class JSEngine {
         source.setObject(host.sourceHeader, forKeyedSubscript: "header" as NSString)
         source.setObject(host.loginUrl, forKeyedSubscript: "loginUrl" as NSString)
         source.setObject(host.concurrentRate, forKeyedSubscript: "concurrentRate" as NSString)
+
+        // 书源声明里的其余字段整体透传。
+        //
+        // 上面逐个 setObject 的只是「调用点最多」的那批；语料里还有
+        // bookSourceType / lastUpdateTime / exploreUrl / ruleExplore /
+        // bookSourceGroup / loginUi / respondTime 等字段被脚本读取（源里写
+        // `source.bookSourceType == '3'`、`timeFormat(source.lastUpdateTime)`
+        // 这类直接比较）。缺一个就是 undefined 参与比较 —— 判断恒为 false，
+        // 依赖它的分支整段走空，表现是「详情读不全 / 更新时间空白」。
+        //
+        // 必须在上面这些**已定值**的键之后写入，但要不覆盖它们：
+        // 宿主算出来的值（例如 getKey 用的 sourceUrl）比原始声明更权威。
+        for (key, value) in host.sourceMeta where !key.isEmpty {
+            // 已定值的键跳过：宿主算出来的值比原始声明更权威
+            // （例如 getKey 用的 sourceUrl 已经过 stripURLAnnotation）。
+            if let existing = source.objectForKeyedSubscript(key), !existing.isUndefined { continue }
+            source.setObject(value, forKeyedSubscript: key as NSString)
+        }
+
+        // source.putLoginInfo(json)：349 个源在登录成功后保存账号 / 密码。
+        //
+        // 书源写法是 `let a = source.getLoginInfoMap(); a["账号"]=…; source.putLoginInfo(JSON.stringify(a))`，
+        // 传进来的是 JSON 文本。缺了它整段登录收尾直接 TypeError，
+        // 用户看到的是「授权码填对了但一直提示未登录」。
+        let putLoginInfo: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            var info = self.loginInfo
+            if let dictionary = JSEngine.dictionaryFrom(value) {
+                for (key, item) in dictionary { info[key] = RuleUtil.asString(item) ?? "" }
+            } else if let dictionary = JSEngine.stringFrom(value).jsonObject as? [String: Any] {
+                for (key, item) in dictionary { info[key] = RuleUtil.asString(item) ?? "" }
+            }
+            guard !info.isEmpty else { return }
+            self.loginInfo = info
+            self.onLoginInfoChanged?(info)
+        }
+        source.setObject(putLoginInfo, forKeyedSubscript: "putLoginInfo" as NSString)
+        source.setObject(putLoginInfo, forKeyedSubscript: "putLoginInfoMap" as NSString)
+        source.setObject(putLoginInfo, forKeyedSubscript: "setLoginInfoMap" as NSString)
+
+        // source.variable：属性形态的源变量（28 个源直接赋值）。
+        // 与 getVariable/setVariable 共用同一份存储，避免两套值打架。
+        JSEngine.defineProperty("variable", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.sourceVariable, in: context)
+            },
+            set: { [weak self] value in
+                guard let self else { return }
+                let text = JSEngine.stringFrom(value)
+                self.sourceVariable = text
+                self.onVariableChanged?(text)
+            },
+            in: context
+        ), on: source, in: context)
+
+        // source.getConcurrentRate() / getBookSourceUrl() / getSource() / getTag()
+        let getConcurrentRate: @convention(block) () -> String = { [weak self] in
+            self?.host.concurrentRate ?? ""
+        }
+        source.setObject(getConcurrentRate, forKeyedSubscript: "getConcurrentRate" as NSString)
+
+        let getBookSourceUrl: @convention(block) () -> String = { [weak self] in
+            self?.host.sourceUrl ?? ""
+        }
+        source.setObject(getBookSourceUrl, forKeyedSubscript: "getBookSourceUrl" as NSString)
+
+        // source.getSource()：60 个源写 `source.getSource().bookSourceComment`
+        // 取公共函数库。返回 source 自身即可满足这个用法。
+        // 只弱持有 self，再由 self.context 取上下文：getSource 挂在 source 上、
+        // source 又挂在 context 上，闭包强引用 context 会构成自环，
+        // 每建一个 JSEngine 就漏掉一整个 JSVirtualMachine。
+        let getSource: @convention(block) () -> JSValue = { [weak self] in
+            guard let self, let context = self.context else { return JSValue() }
+            return context.objectForKeyedSubscript("source") ?? JSValue()
+        }
+        source.setObject(getSource, forKeyedSubscript: "getSource" as NSString)
+
+        let getTag: @convention(block) () -> String = { [weak self] in
+            self?.host.sourceName ?? ""
+        }
+        source.setObject(getTag, forKeyedSubscript: "getTag" as NSString)
+
+        // source.login()：脚本主动要求走登录流程（要求弹登录界面）。
+        let login: @convention(block) () -> Void = { [weak self] in
+            self?.onRequestLogin?()
+        }
+        source.setObject(login, forKeyedSubscript: "login" as NSString)
+
+        // source.setLoginUi(js) / getLoginUi()：自定义登录表单。
+        // 本实现不渲染自定义表单，但必须存在 —— 缺失即 undefined is not a function。
+        let setLoginUi: @convention(block) (JSValue) -> Void = { value in
+            _ = JSEngine.stringFrom(value)
+        }
+        source.setObject(setLoginUi, forKeyedSubscript: "setLoginUi" as NSString)
+        let getLoginUi: @convention(block) () -> String = { "" }
+        source.setObject(getLoginUi, forKeyedSubscript: "getLoginUi" as NSString)
+
+        // source.bookUrlPattern：1 个源用它做地址匹配，给个空串避免 undefined。
+        source.setObject("", forKeyedSubscript: "bookUrlPattern" as NSString)
+
         context.setObject(source, forKeyedSubscript: "source" as NSString)
     }
 
@@ -895,6 +1137,27 @@ final class JSEngine {
             book.setObject(value, forKeyedSubscript: key as NSString)
         }
 
+        // 阅读进度与目录规模：书源据此判断「这一章是不是当前在读章」、
+        // 「还有没有下一章」。实测 durChapterIndex 880 个源、
+        // totalChapterNum 619 个源、durChapterTitle 488 个源在读。
+        book.setObject(host.bookUrl, forKeyedSubscript: "bookUrl" as NSString)
+        book.setObject(host.bookType, forKeyedSubscript: "type" as NSString)
+        book.setObject(host.durChapterIndex, forKeyedSubscript: "durChapterIndex" as NSString)
+        book.setObject(host.durChapterTitle, forKeyedSubscript: "durChapterTitle" as NSString)
+        book.setObject(host.totalChapterNum, forKeyedSubscript: "totalChapterNum" as NSString)
+        book.setObject(host.totalChapterNum, forKeyedSubscript: "totalChapterCount" as NSString)
+        book.setObject(host.canUpdate, forKeyedSubscript: "canUpdate" as NSString)
+        book.setObject(host.customIntro, forKeyedSubscript: "customIntro" as NSString)
+        book.setObject(host.latestChapterTitle, forKeyedSubscript: "latestChapterTitle" as NSString)
+        book.setObject(host.latestChapterTitle, forKeyedSubscript: "lastChapterTitle" as NSString)
+        book.setObject(host.bookStatus, forKeyedSubscript: "status" as NSString)
+        book.setObject(host.reverseToc, forKeyedSubscript: "reverseToc" as NSString)
+        book.setObject(host.useReplaceRule, forKeyedSubscript: "useReplaceRule" as NSString)
+        // book.order：Legado 的书架序号。源写
+        // `if (book && book.order != 0 && reading == '1')` 决定走不走书架同步，
+        // 缺失时 undefined != 0 恒为 true —— 走进「不在书架」的分支。
+        book.setObject(host.bookOrder, forKeyedSubscript: "order" as NSString)
+
         let getBookVariable: @convention(block) (String) -> String? = { [weak self] name in
             self?.host.variables[name]
         }
@@ -905,6 +1168,150 @@ final class JSEngine {
         }
         book.setObject(putBookVariable, forKeyedSubscript: "putVariable" as NSString)
         book.setObject(putBookVariable, forKeyedSubscript: "setVariable" as NSString)
+
+        // book.setReverseToc(bool)：581 个源用它把目录反序。
+        //
+        // 这是**写**操作，必须回写宿主 —— 只在 JS 侧改标志位的话，
+        // 宿主紧接着拿到的还是原目录，「目录正反序切换」点了没反应。
+        let setReverseToc: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            let flag = value.isBoolean ? value.toBool() : JSEngine.stringFrom(value) == "true"
+            self.host.reverseToc = flag
+            self.bookMutation.reverseToc = flag
+            self.host.onReverseTocChanged?(flag)
+        }
+        book.setObject(setReverseToc, forKeyedSubscript: "setReverseToc" as NSString)
+
+        // book.setUseReplaceRule(bool)：158 个源用它开关「净化替换规则」。
+        let setUseReplaceRule: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            self.host.useReplaceRule = value.isBoolean ? value.toBool() : true
+        }
+        book.setObject(setUseReplaceRule, forKeyedSubscript: "setUseReplaceRule" as NSString)
+
+        // book.setType(int)：影视源用它把「小说」改成「影视」（bookSourceType 4）。
+        let setType: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            let type = Int(value.toInt32())
+            self.bookMutation.type = type
+            self.host.onBookTypeChanged?(type)
+        }
+        book.setObject(setType, forKeyedSubscript: "setType" as NSString)
+
+        // book.setBookUrl(url)：脚本改写书籍地址。
+        let setBookUrl: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            let text = JSEngine.stringFrom(value)
+            guard !text.isEmpty else { return }
+            self.host.bookUrl = text
+            self.bookMutation.bookUrl = text
+        }
+        book.setObject(setBookUrl, forKeyedSubscript: "setBookUrl" as NSString)
+
+        // book.putCustomVariable(json)：60 个源用它保存「自定义购票/购买」状态。
+        let putCustomVariable: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            let text = JSEngine.stringFrom(value)
+            self.bookMutation.variable = text
+            self.host.variables["customVariable"] = text
+        }
+        book.setObject(putCustomVariable, forKeyedSubscript: "putCustomVariable" as NSString)
+
+        // book.upCustomIntro()：清掉用户自定义简介（14 个源在目录页调用）。
+        let upCustomIntro: @convention(block) () -> Void = { [weak self] in
+            guard let self else { return }
+            self.host.customIntro = ""
+            self.bookMutation.customIntro = ""
+        }
+        book.setObject(upCustomIntro, forKeyedSubscript: "upCustomIntro" as NSString)
+
+        // book.save() / book.delete()：Legado 的落库操作，本实现只保留可变状态。
+        let saveBook: @convention(block) () -> Void = {}
+        book.setObject(saveBook, forKeyedSubscript: "save" as NSString)
+        book.setObject(saveBook, forKeyedSubscript: "delete" as NSString)
+
+        // book.readConfig：148 个源写 `book.readConfig.useReplaceRule`，
+        // 必须先判 null 才不会 TypeError。给一个带默认值的对象。
+        let readConfig = JSEngine.newObject(in: context)
+        readConfig.setObject(true, forKeyedSubscript: "useReplaceRule" as NSString)
+        readConfig.setObject(false, forKeyedSubscript: "isNightTheme" as NSString)
+        readConfig.setObject("", forKeyedSubscript: "textColor" as NSString)
+        book.setObject(readConfig, forKeyedSubscript: "readConfig" as NSString)
+
+        // book.customVariable：读回 book.putCustomVariable 写过的值。
+        let customVariable: @convention(block) () -> String = { [weak self] in
+            self?.host.variables["customVariable"] ?? ""
+        }
+        book.setObject(customVariable, forKeyedSubscript: "getCustomVariable" as NSString)
+
+        // book.customVariable / book.variable：属性读取（315 个源读 book.variable）。
+        // 走 getter 而不是静态快照，脚本先 putCustomVariable 再读也能拿到新值。
+        JSEngine.defineProperty("variable", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                guard let data = try? JSONSerialization.data(withJSONObject: self.host.variables.snapshot),
+                      let text = String(data: data, encoding: .utf8) else { return JSValue(object: "", in: context) }
+                return JSValue(object: text, in: context)
+            },
+            set: { [weak self] _ in },
+            in: context
+        ), on: book, in: context)
+
+        JSEngine.defineProperty("customVariable", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.host.variables["customVariable"] ?? "", in: context)
+            },
+            set: { [weak self] value in
+                self?.host.variables["customVariable"] = JSEngine.stringFrom(value)
+            },
+            in: context
+        ), on: book, in: context)
+
+        // book.bookUrl / book.customIntro 可写：脚本会改它们。
+        JSEngine.defineProperty("bookUrl", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.host.bookUrl, in: context)
+            },
+            set: { [weak self] value in
+                guard let self else { return }
+                let text = JSEngine.stringFrom(value)
+                guard !text.isEmpty else { return }
+                self.host.bookUrl = text
+                self.bookMutation.bookUrl = text
+            },
+            in: context
+        ), on: book, in: context)
+
+        JSEngine.defineProperty("customIntro", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.host.customIntro, in: context)
+            },
+            set: { [weak self] value in
+                guard let self else { return }
+                let text = JSEngine.stringFrom(value)
+                self.host.customIntro = text
+                self.bookMutation.customIntro = text
+            },
+            in: context
+        ), on: book, in: context)
+
+        JSEngine.defineProperty("canUpdate", descriptor: JSEngine.propertyDescriptor(
+            get: { [weak self] in
+                guard let self, let context = self.context else { return JSValue() }
+                return JSValue(object: self.host.canUpdate, in: context)
+            },
+            set: { [weak self] value in
+                guard let self else { return }
+                let flag = value.isBoolean ? value.toBool() : true
+                self.host.canUpdate = flag
+                self.bookMutation.canUpdate = flag
+            },
+            in: context
+        ), on: book, in: context)
+
         context.setObject(book, forKeyedSubscript: "book" as NSString)
 
         let chapter = JSEngine.newObject(in: context)
@@ -928,6 +1335,24 @@ final class JSEngine {
         }
         chapter.setObject(putChapterVariable, forKeyedSubscript: "putVariable" as NSString)
         chapter.setObject(putChapterVariable, forKeyedSubscript: "setVariable" as NSString)
+
+        // chapter.putImgUrl(url)：把章节配图地址写回章节记录（11 个源）。
+        // 传 null 表示清空。本实现记录到书籍级变量，宿主可读回。
+        let putImgUrl: @convention(block) (JSValue) -> Void = { [weak self] value in
+            guard let self else { return }
+            let text = value.isNull || value.isUndefined ? "" : JSEngine.stringFrom(value)
+            self.host.variables["chapterImgUrl"] = text
+        }
+        chapter.setObject(putImgUrl, forKeyedSubscript: "putImgUrl" as NSString)
+
+        // chapter.isVolume / chapter.title 之类属性已由 chapterInfo 注入；
+        // 补齐常见但恒为默认值的字段，避免 undefined 参与运算。
+        chapter.setObject(false, forKeyedSubscript: "isVolume" as NSString)
+        chapter.setObject("", forKeyedSubscript: "volumeName" as NSString)
+        chapter.setObject("", forKeyedSubscript: "tag" as NSString)
+        chapter.setObject("", forKeyedSubscript: "updateTime" as NSString)
+        chapter.setObject(false, forKeyedSubscript: "isVip" as NSString)
+
         context.setObject(chapter, forKeyedSubscript: "chapter" as NSString)
     }
 
@@ -958,6 +1383,29 @@ final class JSEngine {
             CookieJar.shared.setCookie(value, for: self.host.sourceKey, url: url)
         }
         cookie.setObject(setCookie, forKeyedSubscript: "setCookie" as NSString)
+
+        // cookie.setWebCookie(url, cookie)：WebView 里的 cookie 回写。
+        // 41 个源用它把「浏览器里拿到的登录态」存进 CookieJar。
+        let setWebCookie: @convention(block) (String, String) -> Void = { [weak self] urlString, value in
+            guard let self else { return }
+            let target = urlString.isEmpty ? self.host.baseUrl : urlString
+            guard let url = URL(string: target) else { return }
+            CookieJar.shared.setCookie(value, for: self.host.sourceKey, url: url)
+        }
+        cookie.setObject(setWebCookie, forKeyedSubscript: "setWebCookie" as NSString)
+
+        // cookie.mapToCookie(rawHeader)：把响应里的 set-cookie 原始串
+        // 转成 CookieJar 能吃的形态（16 个源用它做登录回写）。
+        let mapToCookie: @convention(block) (JSValue) -> String = { [weak self] value in
+            guard let self else { return "" }
+            let text = JSEngine.stringFrom(value)
+            guard !text.isEmpty, let url = URL(string: self.host.baseUrl) else { return "" }
+            let pairs = CookieJar.splitPairs(text)
+            guard !pairs.isEmpty else { return "" }
+            CookieJar.shared.setCookiePairs(text, for: self.host.sourceKey, url: url)
+            return pairs.joined(separator: "; ")
+        }
+        cookie.setObject(mapToCookie, forKeyedSubscript: "mapToCookie" as NSString)
 
         let replaceCookie: @convention(block) (String, String) -> Void = { [weak self] urlString, value in
             guard let self, let url = URL(string: urlString) else { return }
@@ -1064,7 +1512,7 @@ final class JSEngine {
         }
     }
 
-    private func makeResponseObject(_ response: HTTPResponse, context: JSContext) -> JSValue {
+    func makeResponseObject(_ response: HTTPResponse, context: JSContext) -> JSValue {
         let object = JSEngine.newObject(in: context)
         let text = response.text
         let headerMap = response.headers
@@ -1200,6 +1648,39 @@ final class JSEngine {
     static func newObject(in context: JSContext) -> JSValue {
         if let object = JSValue(newObjectIn: context) { return object }
         return JSValue()
+    }
+
+    /// 构造一个「带 getter / setter 的属性定义」。
+    ///
+    /// 书源里既有 `source.getVariable()`，也有 `source.variable = …` 的
+    /// 属性赋值写法（实测 28 个源）。属性赋值若不经过 setter，
+    /// 宿主就收不到 onVariableChanged，用户改的源变量下次刷新又回到默认值。
+    /// 这里返回 Object.defineProperty 的 descriptor，由 JS 侧应用。
+    static func propertyDescriptor(
+        get getter: @escaping () -> JSValue,
+        set setter: @escaping (JSValue) -> Void,
+        in context: JSContext
+    ) -> JSValue {
+        let descriptor = newObject(in: context)
+        let getterBlock: @convention(block) () -> JSValue = getter
+        let setterBlock: @convention(block) (JSValue) -> Void = setter
+        descriptor.setObject(getterBlock, forKeyedSubscript: "get" as NSString)
+        descriptor.setObject(setterBlock, forKeyedSubscript: "set" as NSString)
+        descriptor.setObject(true, forKeyedSubscript: "enumerable" as NSString)
+        descriptor.setObject(true, forKeyedSubscript: "configurable" as NSString)
+        return descriptor
+    }
+
+    /// 把 propertyDescriptor 定义到目标对象上。
+    static func defineProperty(_ name: String, descriptor: JSValue, on object: JSValue, in context: JSContext) {
+        guard let define = context.objectForKeyedSubscript("Object")?
+            .objectForKeyedSubscript("defineProperty"), !define.isUndefined else {
+            // 没有 Object.defineProperty（不应发生）：退化成直接赋值，至少不抛错
+            object.setObject(descriptor.objectForKeyedSubscript("get")?.call(withArguments: []) ?? JSValue(),
+                             forKeyedSubscript: name as NSString)
+            return
+        }
+        _ = define.call(withArguments: [object, name, descriptor])
     }
 
     /// 引擎已释放时的占位值。

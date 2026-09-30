@@ -67,11 +67,31 @@ enum RuleValue {
         case .nodes(let nodes):
             guard elements else {
                 let values = nodes.map { XPathEngine.stringValue(of: $0) }
-                return values.count == 1 ? values[0] : values
+                // 文本规则一律给**字符串**，多条匹配用换行拼接。
+                //
+                // 对齐 Legado：AnalyzeRule.getString 先把 jsoup 结果
+                // joinToString("\n") 成字符串，再把该字符串交给 Mode.Js 步骤
+                // （AnalyzeRule.kt:249-254 的 `result = evalJS(rule, it)`，
+                // 此处 it 已是 getString 的字符串结果）。
+                //
+                // 旧实现在「命中多条」时给数组，脚本里的
+                //     result.match(/\d+?.\d+万/g)[0]
+                // 就变成 "result.match is not a function"，整条规则作废 ——
+                // 实测量产日志里这一类报错 54 条中占很大比重，
+                // 界面表现是「字数/分类/简介空着」以及「正文整段看不到」。
+                // 实测 3460 个源里，文本字段对 result 调字符串方法的规则有 280 条，
+                // 而对 result 调数组方法的只有 0 条，因此这里必须给字符串。
+                return values.count == 1 ? values[0] : values.joined(separator: "\n")
             }
             return nodes.count == 1 ? nodes[0] : nodes
         case .strings(let values):
-            return values.count == 1 ? values[0] : values
+            // 同 .nodes：文本场景给字符串，列表场景（JSON 路径选出多条）
+            // 必须保持数组 —— 书源写 `$.items[:10]<js> result.toArray() …`，
+            // 把数组 join 成字符串会让 toArray/concat/map 全部失效。
+            guard !elements else {
+                return values.count == 1 ? values[0] : values
+            }
+            return values.count == 1 ? values[0] : values.joined(separator: "\n")
         case .raw(let any):
             return any
         }
@@ -303,10 +323,42 @@ final class AnalyzeRule {
     private func evaluateChained(_ text: String, elements: Bool) -> RuleValue {
         let pieces = RuleSyntax.splitJSSegments(text)
         guard pieces.count > 1 else {
-            let segments = RuleSyntax.splitChain(text)
+            var segments = RuleSyntax.splitChain(text)
             guard !segments.isEmpty else { return .strings([]) }
-            var value = evaluateBase(segments[0])
-            for segment in segments.dropFirst() { value = applyTransform(segment, to: value, elements: elements) }
+            // 规则以链式 `@` 开头（例：`@href` / `@text` / `@a@href`）时，
+            // 开头会产生一个空段。对齐 Legado 的 AnalyzeRule.trim()：那里
+            // 把开头的 `@` 吞掉，规则落在当前节点上。
+            //
+            // 旧实现直接把空段交给 evaluateBase，求值成空数组，
+            // 后续链式又作用在空数组上，结果恒为空 —— 实测 72 条规则这么写，
+            // 集中在目录的 chapterName / chapterUrl，表现是
+            // 「目录名 / 章节地址整列取不到」。
+            //
+            // Legado 的语序是「除最后一段外都是选择器，最后一段取属性/文本」
+            // （AnalyzeByJSoup.getResultList + getResultLast），因此：
+            //   `@href`     → 当前节点 + 取 href
+            //   `@a@href`   → 当前节点下选 a + 取 href
+            // 两者必须区别对待，不能一律当链式记号。
+            var base: RuleValue
+            var startIndex = 0
+            if segments[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                segments.removeFirst()
+                if segments.count <= 1 {
+                    // 只剩一段：作用于当前节点，该段按链式记号处理
+                    return applyToCurrentContext(segments.first ?? "", elements: elements)
+                } else {
+                    // 还有多段：第一段是选择器，其余按链式处理
+                    base = evaluateBase(segments[0])
+                    startIndex = 1
+                }
+            } else {
+                base = evaluateBase(segments[0])
+                startIndex = 1
+            }
+            var value = base
+            for segment in segments.dropFirst(startIndex) {
+                value = applyTransform(segment, to: value, elements: elements)
+            }
             return value
         }
 
@@ -703,6 +755,44 @@ final class AnalyzeRule {
     }
 
     // MARK: 内容辅助
+
+    /// 当前内容作为规则值。
+    ///
+    /// 用于「规则以链式 `@` 开头」的情形：Legado 的 AnalyzeRule.trim() 会把
+    /// 开头那个 `@` 吞掉，规则直接作用在当前节点/内容上，
+    /// 因此 `@href` / `@text` 取的是**当前节点本身**的属性或文本。
+    ///
+    /// 节点与文档统一包成 .nodes（选择器求值的自然形态）；
+    /// 其余内容（JSON 对象 / 字符串）原样透传，交由后续链式记号处理。
+    private func currentContextValue() -> RuleValue {
+        if let node = context.content as? HTMLNode { return .nodes([node]) }
+        if let nodes = context.content as? [HTMLNode] { return .nodes(nodes) }
+        if let document = context.document { return .nodes([document]) }
+        // 注意不能写 `.raw(context.content as Any)`：content 是 Any?，
+        // 包成 Any 之后 `Optional.none` 会变成「非 nil 的 Any」，
+        // 后续 asString 会走进容器分支得到 "null" 之类的垃圾文本。
+        guard let content = context.content else { return .strings([]) }
+        return .raw(content)
+    }
+
+    /// 把一段链式记号作用在**当前内容**上（规则以 `@` 开头时）。
+    ///
+    /// 两种语义都要支持，且优先「取属性 / 取文本」这类真正的链式记号：
+    ///
+    /// - `@href` / `@text` / `@title` → 取当前节点的属性或文本；
+    /// - `@baseUrl` → 书源里表示「当前页面地址」，是个变量而不是属性名。
+    ///   属性缺失时若退回节点文本，会得到一大段 HTML 拼出的假地址，
+    ///   请求必然失败。实测 📂知妖 / 168TXT 两个源用 `@baseUrl` 当目录地址。
+    /// - `@a@href` 这种「先选子元素再取属性」由调用方的多段分支处理，
+    ///   不会走到这里（这里只处理**只剩一段**的情况）。
+    private func applyToCurrentContext(_ segment: String, elements: Bool) -> RuleValue {
+        let text = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return currentContextValue() }
+        if text.lowercased() == "baseurl", let baseUrl = context.baseUrl, !baseUrl.isEmpty {
+            return .strings([baseUrl])
+        }
+        return applyTransform(text, to: currentContextValue(), elements: elements)
+    }
 
     private func jsonContent() -> Any? {
         if let dictionary = context.content as? [String: Any] { return dictionary }

@@ -81,6 +81,67 @@ final class CookieJar {
         save()
     }
 
+    /// 写入「一整串」cookie（`a=1; b=2` 或 `a=1, b=2` 形态）。
+    ///
+    /// `setCookie` 只认单个 `name=value; attr=…`，而
+    /// `cookie.mapToCookie(response.cookies())` 这类书源给的是
+    /// **多组**键值对拼起来的串。直接丢给 `setCookie` 只会存下第一组，
+    /// 其余全丢 —— 表现就是「登录成功了，但只有部分接口带得上 cookie」。
+    func setCookiePairs(_ header: String, for sourceKey: String, url: URL) {
+        for pair in CookieJar.splitPairs(header) {
+            setCookie(pair, for: sourceKey, url: url)
+        }
+    }
+
+    /// 把 cookie 串切成一组组 `name=value`。
+    ///
+    /// 逗号分隔时要避开 `Expires=Wed, 21 Oct ...` 里的日期逗号：
+    /// 只有当逗号后面跟的是 `name=` 形态时才当作分隔符。
+    static func splitPairs(_ header: String) -> [String] {
+        var pairs: [String] = []
+        for segment in header.components(separatedBy: ";") {
+            for candidate in CookieJar.splitByComma(segment) {
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                // 属性（path / domain / expires / httponly …）没有等号或不是键值对，跳过
+                let tokens = trimmed.components(separatedBy: "=")
+                guard tokens.count >= 2, !tokens[0].isEmpty else { continue }
+                let name = tokens[0].trimmingCharacters(in: .whitespaces)
+                let lowered = name.lowercased()
+                if ["path", "domain", "expires", "max-age", "samesite", "comment"].contains(lowered) { continue }
+                if lowered.contains(" ") { continue }
+                pairs.append(trimmed)
+            }
+        }
+        return pairs
+    }
+
+    private static func splitByComma(_ value: String) -> [String] {
+        var results: [String] = []
+        var current = ""
+        var index = value.startIndex
+        while index < value.endIndex {
+            let character = value[index]
+            if character == "," {
+                let rest = value[value.index(after: index)...]
+                let head = rest.prefix { $0 == " " || $0 == "\t" }
+                let after = rest.dropFirst(head.count)
+                let token = after.prefix { $0 != "=" && $0 != ";" && $0 != "," }
+                // 逗号后是「标识符 + =」才认定为分组分隔
+                if !token.isEmpty, !token.contains(" "), token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) {
+                    results.append(current)
+                    current = ""
+                    index = value.index(index, offsetBy: 1)
+                    continue
+                }
+            }
+            current.append(character)
+            index = value.index(after: index)
+        }
+        results.append(current)
+        return results
+    }
+
     private static func parse(_ raw: String, url: URL) -> Cookie? {
         let parts = raw.components(separatedBy: ";")
         guard let first = parts.first else { return nil }
