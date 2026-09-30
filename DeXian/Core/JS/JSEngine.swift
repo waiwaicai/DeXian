@@ -190,13 +190,41 @@ final class JSEngine {
             while index < candidates.count {
                 let candidate = candidates[index]
                 context.exception = nil
+                // 求值期间必须**临时摘掉 exceptionHandler**，否则异常根本看不见。
+                //
+                // JavaScriptCore 在设置了 exceptionHandler 之后，把未捕获异常
+                // 只交给 handler，**不再写入 `context.exception`**。本引擎在
+                // setup() 里装了这个 handler（用于把未捕获异常写进调试日志），
+                // 于是 `context.exception` 恒为 nil ——
+                // 后果不是「少一条日志」，而是**每一次语法错误都被当成求值成功**：
+                // 下面的 guard 判定为 nil 直接 return，既不会换包装重试、
+                // 也不会走归一化兜底。
+                //
+                // 实测（真机 iOS 27 + 单元测试）：裸解构箭头脚本
+                //     [[1,2],[3,4]].map([a,b]=>{ … }); out.join(',')
+                // 的块形态与函数形态各抛一次
+                //     SyntaxError: Unexpected token '=>'. Expected ')' to end an argument list.
+                // handler 日志里两条都在，但 context.exception 始终是 nil，
+                // 循环在第一轮就返回 undefined —— 正常的脚本形态与
+                // 归一化形态都拿不到机会执行，最终静默返回空串。
+                //
+                // 摘掉 handler 后异常会正常落到 `context.exception`；
+                // 求值结束立刻原样装回，不影响其它路径的日志与兜底。
+                //
+                // 这里**不主动调用**被摘掉的 handler：失败脚本最终会由函数
+                // 末尾的 `Log.debugLog("JS", "异常: …" + 脚本前缀)` 记录，
+                // 那条信息比 handler 的原文更全（带脚本内容），
+                // 主动调用只会让同一条错在调试日志里出现两次。
+                let savedExceptionHandler = context.exceptionHandler
+                context.exceptionHandler = nil
                 let value = context.evaluateScript(candidate)
-                guard let exception = context.exception else {
+                let thrown = context.exception
+                context.exception = nil
+                context.exceptionHandler = savedExceptionHandler
+                guard let exception = thrown else {
                     return JSEngine.swiftValue(value)
                 }
                 lastMessage = exception.toString() ?? ""
-                context.exception = nil
-                Log.debugLog("DIAG", "iter index=" + String(index) + " count=" + String(candidates.count) + " msg=" + String(lastMessage.prefix(70)))
                 // 只有**语法错误**才允许换一种包装重试：语法错误阶段一行都没执行，
                 // 重试没有副作用。运行期异常可能已经发过网络请求，
                 // 再跑一次会把请求翻倍，必须直接放弃。
@@ -236,15 +264,12 @@ final class JSEngine {
                     // 归一化候选根本没机会执行，修复等于没生效。
                     let firstNormalized = candidates.count
                     let extra = JSEngine.normalizedCandidates(script)
-                    Log.debugLog("DIAG", "normalize extra=" + String(extra.count) + " firstNorm=" + String(firstNormalized) + " isSyntax=" + String(isSyntaxError))
                     if !extra.isEmpty {
                         candidates.append(contentsOf: extra)
                         index = firstNormalized
-                        Log.debugLog("DIAG", "appended -> index=" + String(index) + " count=" + String(candidates.count))
                         continue
                     }
                 }
-                Log.debugLog("DIAG", "break out of loop at index=" + String(index))
                 break
             }
             if !lastMessage.isEmpty {

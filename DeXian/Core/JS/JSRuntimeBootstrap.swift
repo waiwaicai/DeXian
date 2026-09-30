@@ -1429,10 +1429,17 @@ if (typeof infoMap === 'undefined') {
     /// 求值失败只记日志，不让引擎初始化失败：
     /// 兼容层缺失时书源会走自己的 try/catch，比整个上下文不可用要好。
     static func install(into context: JSContext) {
+        // 与 JSEngine.evaluateOnQueue 同样的处理：装了 exceptionHandler 之后
+        // JavaScriptCore 不再写 `context.exception`，异常会被静默吞掉。
+        // 这里临时摘掉 handler，才能真的看见注入失败的原因。
+        let savedExceptionHandler = context.exceptionHandler
+        context.exceptionHandler = nil
         _ = context.evaluateScript(source)
-        if let exception = context.exception {
+        let thrown = context.exception
+        context.exception = nil
+        context.exceptionHandler = savedExceptionHandler
+        if let exception = thrown {
             Log.debugLog("JS", "运行时兼容层注入异常: " + (exception.toString() ?? ""))
-            context.exception = nil
         }
     }
 }
