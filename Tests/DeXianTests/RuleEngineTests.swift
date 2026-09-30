@@ -1018,11 +1018,11 @@ final class SourceProbeTests: XCTestCase {
     /// 探测状态的可清理判定：只有「确实坏了」的才算可清理。
     ///
     /// 这条规则直接决定「一键清除」会删掉什么，删错就是用户的损失，
-    /// 所以三类必须区分清楚：
+    /// 所以每一类都要明确：
     /// - 有效：不清理
     /// - 用户自己禁用的：不清理（那是他的选择）
     /// - 需要登录的：不清理（源是好的，是配置问题）
-    /// - 网络不通 / 超时 / 无结果：清理
+    /// - 站点没了 / 规则失效（域名解析失败、无法连接、搜索无结果）：清理
     func testProbeStateRemovablePolicy() {
         XCTAssertFalse(SourceProbe.State.valid(count: 3).isRemovable)
         XCTAssertFalse(SourceProbe.State.skipped(reason: "已禁用").isRemovable)
@@ -1386,7 +1386,10 @@ final class RssTests: XCTestCase {
         for declaration in ["<meta charset=\"gbk\">", "<meta CHARSET=\"GBK\">",
                             "<meta Charset=\"gb2312\">", "<META CHARSET=\"Gbk\">"] {
             let html = "<html><head>" + declaration + "</head><body>正文</body></html>"
-            guard let data = html.data(using: .isoLatin1) else { continue XCTFail("构造失败") }
+            guard let data = html.data(using: .isoLatin1) else {
+                XCTFail("构造失败")
+                continue
+            }
             let decoded = Charset.decode(data, preferred: nil)
             XCTAssertFalse(decoded.isEmpty, declaration + " 不应解出空串")
         }
