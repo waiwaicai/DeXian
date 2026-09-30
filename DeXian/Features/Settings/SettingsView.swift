@@ -52,6 +52,17 @@ struct SettingsView: View {
                     detail: "支持 JSON / 链接 / 剪贴板"
                 )
             }
+
+            NavigationLink {
+                SourceProbeView()
+            } label: {
+                settingsRow(
+                    icon: "stethoscope",
+                    color: Theme.Palette.warning,
+                    title: "书源探测",
+                    detail: "筛出失效源并一键清除"
+                )
+            }
         } header: {
             Text("书源")
         } footer: {

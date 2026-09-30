@@ -1001,6 +1001,78 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("result.select('a').first().attr('href')"), "/book/1")
     }
 }
+
+// MARK: - 书源探测
+
+final class SourceProbeTests: XCTestCase {
+
+    private func makeSource(name: String, enabled: Bool = true, searchURL: String = "https://example.com/search?q={{key}}") -> BookSource {
+        BookSource(dict: [
+            "bookSourceName": name,
+            "bookSourceUrl": "https://example.com",
+            "enabled": enabled,
+            "searchUrl": searchURL
+        ])
+    }
+
+    /// 探测状态的可清理判定：只有「确实坏了」的才算可清理。
+    ///
+    /// 这条规则直接决定「一键清除」会删掉什么，删错就是用户的损失，
+    /// 所以三类必须区分清楚：
+    /// - 有效：不清理
+    /// - 用户自己禁用的：不清理（那是他的选择）
+    /// - 需要登录的：不清理（源是好的，是配置问题）
+    /// - 网络不通 / 超时 / 无结果：清理
+    func testProbeStateRemovablePolicy() {
+        XCTAssertFalse(SourceProbe.State.valid(count: 3).isRemovable)
+        XCTAssertFalse(SourceProbe.State.skipped(reason: "已禁用").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "未检测到登录状态，请先登录").isRemovable)
+        XCTAssertTrue(SourceProbe.State.invalid(reason: "搜索无结果").isRemovable)
+        XCTAssertTrue(SourceProbe.State.invalid(reason: "不支持搜索").isRemovable)
+        XCTAssertTrue(SourceProbe.State.invalid(reason: "域名解析失败").isRemovable)
+        XCTAssertTrue(SourceProbe.State.invalid(reason: "无法连接服务器").isRemovable)
+    }
+
+    /// 网络类失败绝不能触发清理。
+    ///
+    /// 判据用白名单正是因为这里：用户在地铁里点一下「清除失效」，
+    /// 如果「当前无网络」被算作无效，整个书源库会被清空 —— 这是
+    /// 不可逆的损失，比漏清几个死源严重得多。
+    func testTransientFailuresAreNeverRemovable() {
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "当前无网络").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "网络连接中断").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "请求超时").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "请求已取消").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "已取消").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "探测超时").isRemovable)
+        XCTAssertFalse(SourceProbe.State.invalid(reason: "HTTPS 证书校验失败").isRemovable)
+    }
+
+    /// skipped 不是「可用」，但也不能被清掉
+    func testSkippedIsNeitherValidNorRemovable() {
+        let state = SourceProbe.State.skipped(reason: "已禁用")
+        XCTAssertFalse(state.isValid)
+        XCTAssertFalse(state.isRemovable)
+        XCTAssertEqual(state.displayText, "已禁用")
+    }
+
+    /// 探测结果文案里要带上命中数量，用户据此判断源的强弱
+    func testValidStateShowsHitCount() {
+        XCTAssertEqual(SourceProbe.State.valid(count: 12).displayText, "可用 · 搜到 12 本")
+    }
+
+    /// 禁用或没有搜索地址的源不参与探测（不必发请求就已经知道结果）
+    func testProbeSkipsDisabledAndSearchlessSources() async {
+        let disabled = makeSource(name: "禁用源", enabled: false)
+        let state = await SourceProbe.probe(disabled, keyword: "剑来")
+        XCTAssertEqual(state, .skipped(reason: "已禁用"))
+
+        let noSearch = makeSource(name: "无搜索源", searchURL: "")
+        let missing = await SourceProbe.probe(noSearch, keyword: "剑来")
+        XCTAssertEqual(missing, .invalid(reason: "不支持搜索"))
+    }
+}
+
 // MARK: - 订阅源（RSS）
 
 final class RssTests: XCTestCase {
@@ -1303,6 +1375,47 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(decoded, text, "合法的 UTF-8 不能被 gbk 声明覆盖： " + decoded)
     }
 
+    /// meta 探测里的按大小写查找不能破坏下标。
+    ///
+    /// 旧实现先在 ascii 上取 range，再拿这个 range 的下标去切 lowered
+    /// （跨字符串用索引），Swift 会直接陷阱 —— 而这条路径只有在
+    /// 「响应体不是合法 UTF-8」时才会走到，这正是「有些书一打开就闪退」
+    /// 而其余书完全正常的原因。这里用 GBK 页面（必然非 UTF-8）
+    /// 覆盖真实触发条件。
+    func testHTMLMetaCharsetLookupIsCaseInsensitiveAndSafe() {
+        for declaration in ["<meta charset=\"gbk\">", "<meta CHARSET=\"GBK\">",
+                            "<meta Charset=\"gb2312\">", "<META CHARSET=\"Gbk\">"] {
+            let html = "<html><head>" + declaration + "</head><body>正文</body></html>"
+            guard let data = html.data(using: .isoLatin1) else { continue XCTFail("构造失败") }
+            let decoded = Charset.decode(data, preferred: nil)
+            XCTAssertFalse(decoded.isEmpty, declaration + " 不应解出空串")
+        }
+    }
+
+    /// 大小写混写的 charset 声明也必须能识别出来
+    func testHTMLMetaCharsetUpperCaseIsRecognised() {
+        let body = "第一章 山边小村"
+        guard let gbk = Charset.encoding(named: "gb18030"),
+              let bodyData = body.data(using: gbk) else { return XCTFail("GB18030 不可用") }
+        var data = Data("<html><head><meta CHARSET=\"GBK\"></head><body>".data(using: .isoLatin1)!)
+        data.append(bodyData)
+        data.append(Data("</body></html>".data(using: .isoLatin1)!))
+        let decoded = Charset.decode(data)
+        XCTAssertTrue(decoded.contains(body), "大写 CHARSET 声明未被识别： " + decoded)
+    }
+
+    /// 非 UTF-8 页面必须能一路解到底而不崩（回归：跨字符串索引用陷阱）
+    func testDecodeNonUTF8PageDoesNotTrap() {
+        // 构造一个「前 4096 字节里全是高位字节」的页面：旧实现最容易在这里崩
+        guard let gbk = Charset.encoding(named: "gb18030") else { return XCTFail("GB18030 不可用") }
+        let filler = String(repeating: "测试", count: 800)
+        let html = "<html><head><meta charset=\"gbk\"></head><body>" + filler + "</body></html>"
+        guard let data = html.data(using: gbk) else { return XCTFail("构造失败") }
+        XCTAssertFalse(Charset.isValidUTF8(data))
+        let decoded = Charset.decode(data)
+        XCTAssertTrue(decoded.contains("测试"), "GBK 页面应解出中文： " + String(decoded.prefix(40)))
+    }
+
     /// 正文里混进的 HTML 标签必须清掉，不能当成正文显示
     func testContentStripsHTMLArtifacts() {
         let raw = "<script>read2();</script><p>第一段</p><br/><br/><div id=\"tip\">广告</div>第二段&amp;结尾"
@@ -1559,6 +1672,90 @@ final class RssTests: XCTestCase {
         XCTAssertNotNil(PageSplitter.uiFont(family: "等宽", size: 17))
         XCTAssertNotNil(PageSplitter.uiFont(family: "未知字体", size: 17))
     }
+
+    /// 每一页的底部留白不得超过约 3 行。
+    ///
+    /// 这是「字体放大以后没有铺满全屏」的直接回归测试。
+    ///
+    /// 旧实现为了把段落断在换行处，允许回退到本页容量的 65%（最多丢 35%）。
+    /// 段落长度接近整页时，最近的换行恰好落在回退窗口里，于是每页都要
+    /// 丢掉好几行 —— 字号越大每行字数越少，丢的行数看起来越多。
+    ///
+    /// 断言刻意用「行」为单位而不是百分比：分页的高度度量随字体变化，
+    /// 用点数表达才对所有字号一致。自然留白最多一行（二分取最大值），
+    /// 加上回退上限 1.5 行，因此 3 行是稳妥的上界；
+    /// 而旧实现在同样场景下会留出 7～13 行，必然被抓住。
+    func testPagesFillAvailableHeight() {
+        for fontSize in [16.0, 22.0, 30.0] {
+            let layout = PageSplitter.Layout(
+                font: UIFont.systemFont(ofSize: fontSize),
+                lineSpacing: 6,
+                paragraphSpacing: 8,
+                indent: false,
+                height: 700,
+                width: 360
+            )
+            let lineHeight = Self.measuredLineHeight(layout)
+            let perLine = max(1, Int(layout.width / fontSize))
+            let capacity = Int(layout.height / lineHeight) * perLine
+            // 段落取容量的六成：保证每页边界都落在一段中间，
+            // 「最近的换行」因此可能落在回退窗口里 —— 正是要考的场景。
+            let paragraph = String(repeating: "得闲阅读测试正文内容",
+                                   count: max(2, capacity * 3 / 5 / 10))
+            let text = Array(repeating: paragraph, count: 14).joined(separator: "\n")
+            let pages = PageSplitter.paginate(text: text, layout: layout)
+            XCTAssertGreaterThan(pages.count, 2, "字号 \(fontSize) 应切出多页")
+
+            for (offset, page) in pages.enumerated() where offset < pages.count - 1 {
+                let used = Self.measure(page, font: layout.font,
+                                        lineSpacing: layout.lineSpacing, width: layout.width)
+                let unused = layout.height - used
+                XCTAssertLessThanOrEqual(
+                    unused, lineHeight * 3,
+                    "字号 \(fontSize) 第 \(offset + 1) 页底部留白 \(Int(unused))pt"
+                        + "（约 \(String(format: "%.1f", unused / lineHeight)) 行），超过 3 行"
+                )
+            }
+        }
+    }
+
+    /// 单行高度（含行距），用于把留白换算成行数
+    private static func measuredLineHeight(_ layout: PageSplitter.Layout) -> CGFloat {
+        measure("得闲", font: layout.font, lineSpacing: layout.lineSpacing, width: layout.width)
+    }
+
+    /// 分页实测高度：与 PageSplitter 内部同一套度量
+    private static func measure(_ text: String, font: UIFont, lineSpacing: CGFloat, width: CGFloat) -> CGFloat {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = lineSpacing
+        paragraph.paragraphSpacing = 0
+        paragraph.lineBreakMode = .byWordWrapping
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [.font: font, .paragraphStyle: paragraph]
+        )
+        return ceil(attributed.boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        ).height)
+    }
+
+    /// 段落断点仍要被优先采用（回退窗口只是收紧，不是取消）
+    func testPaginationStillPrefersNearbyLineBreaks() {
+        // 段落很短（一行多一点），断点总在回退窗口内，必须被采用
+        let text = (0..<120).map { _ in "得闲阅读段落测试。" }.joined(separator: "\n")
+        let layout = PageSplitter.Layout(
+            font: UIFont.systemFont(ofSize: 17), lineSpacing: 6, paragraphSpacing: 8,
+            indent: false, height: 600, width: 320
+        )
+        let pages = PageSplitter.paginate(text: text, layout: layout)
+        XCTAssertGreaterThan(pages.count, 1)
+        for page in pages.dropLast() {
+            XCTAssertTrue(page.hasSuffix("。"), "页尾应在段落结束处： " + String(page.suffix(12)))
+        }
+    }
+
 
     /// 发现分类去重：重复 id 会让 ForEach 崩溃
     func testExploreCategoriesDeduplicateById() {

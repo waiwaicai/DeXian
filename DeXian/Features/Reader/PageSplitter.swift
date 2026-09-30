@@ -53,10 +53,19 @@ enum PageSplitter {
             let length = max(1, fitting)
             let end = min(start + length, ns.length)
 
-            // 优先在换行处断开：从后往前找最近的一个换行，
-            // 但不要切掉太多（限制在本页的 65% 之后）
+            // 优先在换行处断开，让段落尽量完整。
+            //
+            // 但回退窗口必须收紧：页面要「填满」，而不是「尽量断在段落处」。
+            // 旧实现允许回退到本页的 65% 处，等于最多丢掉 35% 的容量；
+            // 而每行容纳的字符数随字号增大而减少，同样的比例在放大字号后
+            // 丢掉的行数更多 —— 用户看到的「有些书字体放大以后没有铺满全屏、
+            // 下方留一大片空」就是这个回退造成的。
+            // 现在最多回退 1.5 行（并额外限制在 12% 容量以内），
+            // 段落断点只在「相邻不远处」才作为优化生效。
             var cut = end
-            let lowerBound = start + Int(Double(length) * 0.65)
+            let charactersPerLine = max(1, Int(layout.width / max(8, layout.font.pointSize)))
+            let backtrack = min(Int(Double(length) * 0.12), charactersPerLine + charactersPerLine / 2)
+            let lowerBound = max(start, end - backtrack)
             if end < ns.length, lowerBound < end {
                 let searchRange = NSRange(location: lowerBound, length: end - lowerBound)
                 let newline = ns.range(of: "\n", options: .backwards, range: searchRange)

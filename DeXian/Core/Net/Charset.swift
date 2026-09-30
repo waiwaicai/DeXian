@@ -68,9 +68,17 @@ enum Charset {
     static func fromHTMLMeta(_ data: Data) -> String.Encoding? {
         let prefix = data.prefix(4096)
         guard let ascii = String(data: prefix, encoding: .isoLatin1) else { return nil }
-        let lowered = ascii.lowercased()
 
-        if let range = lowered.range(of: "charset=") {
+        // 关键：range 必须来自当前这个字符串本身。
+        //
+        // 旧实现是先在 ascii 上取 range，再拿这个 range 的下标去切
+        // lowered（`ascii[range.upperBound...]`）—— 两个字符串的下标
+        // 互不通用，Swift 在下标处会直接陷阱（SIGTRAP + 断点陷阱）。
+        // 触发条件是「响应体不是 UTF-8」：这时才会走到 meta 探测，
+        // 而 GBK 中文页面的前 4096 字节里全是高位字节，
+        // 于是「有些书一打开就闪退」，其余的书则完全正常。
+        // 改成大小写不敏感的查找，range 天然属于 ascii，不再跨字符串。
+        if let range = ascii.range(of: "charset=", options: .caseInsensitive) {
             var value = String(ascii[range.upperBound...])
             value = value.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
             var name = ""

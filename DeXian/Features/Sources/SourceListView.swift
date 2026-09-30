@@ -224,13 +224,25 @@ struct SourceListView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
-            Button(editing ? "完成" : "管理") {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    editing.toggle()
-                    selection.removeAll()
+            HStack(spacing: Theme.Spacing.md) {
+                // 编辑态下不再显示探测入口：批量操作栏已经占满底部，
+                // 再挂一个入口容易误触。
+                if !editing {
+                    NavigationLink {
+                        SourceProbeView()
+                    } label: {
+                        Image(systemName: "stethoscope")
+                    }
                 }
+
+                Button(editing ? "完成" : "管理") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        editing.toggle()
+                        selection.removeAll()
+                    }
+                }
+                .font(.themeCallout)
             }
-            .font(.themeCallout)
         }
     }
 
