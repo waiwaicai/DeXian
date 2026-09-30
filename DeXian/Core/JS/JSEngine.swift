@@ -207,23 +207,41 @@ final class JSEngine {
                     // 只匹配前两种写法时，这条判定会失败并直接放弃，
                     // 于是「顶层 return」的脚本永远拿到空串。
                     || lastMessage.contains("Return statements are only valid inside functions")
-                guard isSyntaxError else { break }
-                if index + 1 < candidates.count {
+                // 常规形态还有剩余且确认是语法错误：换下一种包装重试。
+                if isSyntaxError, index + 1 < candidates.count {
                     index += 1
                     continue
                 }
-                // 常规形态已用尽且仍报语法错误：改用归一化后的脚本再试一轮。
-                // 这一步修的是一类很集中的真实书源写法：
+                // 归一化兜底：**不依赖报错文案**。
+                //
+                // 归一化只有在脚本里真的存在「裸解构箭头参数」时才返回候选，
+                // 而那种写法本身就是语法错误，所以这里不会把运行期异常
+                // 误重试成一次额外请求 —— 那类脚本归一化不产生任何改动，
+                // 与上面「运行期异常必须直接放弃」的约定并不冲突。
+                //
+                // 之所以不能只认 "SyntaxError" 文案：JavaScriptCore 对这类
+                // 语法错误的原文是 "Malformed arrow function parameter list"，
+                // 既不含 "SyntaxError" 也不含 "Illegal return"，判定必然失败，
+                // 归一化就永远用不上 —— 修的是：
                 //     arr.map([title, b] => { … })
-                // Rhino 宽容，标准 JS 引擎（JSC / V8）直接报
-                // "Malformed arrow function parameter list"，整段脚本一行不执行。
+                // Rhino 宽容，标准 JS 引擎（JSC / V8）直接报错、整段不执行。
                 // 实测新书源里 30 段脚本栽在这里，表现是那些源的发现页/目录全空。
                 if !appendedNormalized {
                     appendedNormalized = true
-                    candidates.append(contentsOf: JSEngine.normalizedCandidates(script))
+                    // 记住追加起点：追加后必须**直接跳到第一个归一化候选**。
+                    // 若写成 index += 1，当 index 还停在常规形态中间时
+                    // 会落到另一个常规形态上 —— 它必然报同样的语法错误，
+                    // 而 appendedNormalized 已为真，循环随即退出，
+                    // 归一化候选根本没机会执行，修复等于没生效。
+                    let firstNormalized = candidates.count
+                    let extra = JSEngine.normalizedCandidates(script)
+                    if !extra.isEmpty {
+                        candidates.append(contentsOf: extra)
+                        index = firstNormalized
+                        continue
+                    }
                 }
-                guard index + 1 < candidates.count else { break }
-                index += 1
+                break
             }
             if !lastMessage.isEmpty {
                 Log.debugLog("JS", "异常: " + lastMessage + " | 脚本: " + String(script.prefix(160)))
@@ -780,12 +798,18 @@ final class JSEngine {
         }
         source.setObject(get, forKeyedSubscript: "get" as NSString)
 
+        // 下面这两个别名指向上面 **已按 Legado 语义实现**的版本。
+        //
+        // 这里曾经还接着注册 setVariable / getVariable / putVariable 的旧实现，
+        // 用同一个 key 覆盖掉上面刚注册好的版本 —— Swift 的
+        // setObject(_:forKeyedSubscript:) 是覆盖而非报错，于是
+        //     source.getVariable()   → 桥成 undefined（旧实现返回 String?）
+        //     source.setVariable(x)  → 不写回、不触发 onVariableChanged
+        // 书源普遍写 `source.getVariable() || '{}'` / 先 set 再 get，
+        // 拿不到值就整段走空，用户看到的是「短剧 / 听书打不开」。
+        // 因此这里只保留别名映射，不要再注册任何 get/set 实现。
         source.setObject(getVariable, forKeyedSubscript: "getVariableMap" as NSString)
         source.setObject(setVariable, forKeyedSubscript: "putVariable" as NSString)
-        source.setObject(setVariable, forKeyedSubscript: "setVariable" as NSString)
-        source.setObject(get, forKeyedSubscript: "getVariable" as NSString)
-        source.setObject(put, forKeyedSubscript: "setVariable" as NSString)
-        source.setObject(put, forKeyedSubscript: "putVariable" as NSString)
         source.setObject(getLoginHeader, forKeyedSubscript: "getLoginHeader" as NSString)
         source.setObject(getLoginInfoMap, forKeyedSubscript: "getLoginInfoMap" as NSString)
         let refreshJSLib: @convention(block) () -> Void = {}
