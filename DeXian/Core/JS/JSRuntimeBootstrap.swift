@@ -1245,6 +1245,84 @@ __dxDollar.isArray = function (v) { return Array.isArray(v); };
 __dxDollar.isEmptyObject = function (v) { return !v || Object.keys(v).length === 0; };
 __dxDollar.parseHTML = function (html) { return __dxJsoupDocument(html); };
 
+// ---------------------------------------------------------------------------
+// 把「Swift 侧桥过来的普通对象」包成 java.util.Map。
+//
+// 书源对 source.getLoginInfoMap() / getVariable() 这类返回值的用法是 Java 的：
+//     var info = source.getLoginInfoMap();
+//     var uid = info.get('账号');          // ← Map 语义
+//     var pwd = info.get('密码');
+// 而 Swift 的 [String: String] 桥到 JS 就是普通对象，只有 info['账号'] 可用，
+// info.get 是 undefined。实测日志里刷屏的
+//     TypeError: info.get is not a function
+// 就是这个原因 —— 登录脚本整段失效（微信读书、书旗等源都依赖它）。
+//
+// 包出来的 Map 同时保留下标访问，两种写法都能用。
+// ---------------------------------------------------------------------------
+function __dxWrapMap(value) {
+  // 用 api 对象**自身**当存储：下标访问与 .get() / .put() 读写的是同一份数据。
+  // 若另开一个内部对象做存储，`info['账号'] = 'x'` 之后 `info.get('账号')`
+  // 读到的还是旧值，书源里两种写法混用时会拿到错的数据。
+  var api = {
+    toString: function () {
+      var out = {};
+      for (var k in api) {
+        if (typeof api[k] !== 'function') { out[k] = api[k]; }
+      }
+      try { return JSON.stringify(out); } catch (e) { return '{}'; }
+    },
+    put: function (k, v) { api[String(k)] = v; return v; },
+    get: function (k) {
+      var key = String(k);
+      return Object.prototype.hasOwnProperty.call(api, key) ? api[key] : null;
+    },
+    getOrDefault: function (k, d) {
+      var key = String(k);
+      return Object.prototype.hasOwnProperty.call(api, key) ? api[key] : d;
+    },
+    containsKey: function (k) { return Object.prototype.hasOwnProperty.call(api, String(k)); },
+    containsValue: function (v) {
+      for (var k in api) { if (typeof api[k] !== 'function' && api[k] === v) { return true; } }
+      return false;
+    },
+    remove: function (k) {
+      var key = String(k);
+      var v = api[key];
+      delete api[key];
+      return v === undefined ? null : v;
+    },
+    size: function () { return api.keySet().length; },
+    isEmpty: function () { return api.keySet().length === 0; },
+    clear: function () {
+      var keys = api.keySet();
+      for (var i = 0; i < keys.length; i++) { delete api[keys[i]]; }
+    },
+    keySet: function () {
+      var out = [];
+      for (var k in api) { if (typeof api[k] !== 'function') { out.push(k); } }
+      return out;
+    },
+    values: function () {
+      var out = [];
+      for (var k in api) { if (typeof api[k] !== 'function') { out.push(api[k]); } }
+      return out;
+    },
+    putAll: function (other) {
+      if (other) { for (var k in other) { if (typeof other[k] !== 'function') { api[k] = other[k]; } } }
+    },
+    forEach: function (fn) {
+      var keys = api.keySet();
+      for (var i = 0; i < keys.length; i++) { fn(api[keys[i]], keys[i]); }
+    }
+  };
+  if (value && typeof value === 'object') {
+    for (var k in value) {
+      if (Object.prototype.hasOwnProperty.call(value, k)) { api[k] = value[k]; }
+    }
+  }
+  return api;
+}
+
 var $ = __dxDollar;
 
 // 少数源用 jQuery 风格但整体挂在大写命名空间下

@@ -282,21 +282,163 @@ final class HTTPClient {
         }
     }
 
-    /// 解析 url,{"method":"POST","body":...} 形式的规则。
+    /// 解析 `url,{"method":"POST","body":...}` 形式的规则。
+    ///
+    /// 实测书源里的尾随选项**不是严格 JSON**，而是 JS 对象字面量：
+    /// 键名不加引号（`{webView:true}`）、字符串用单引号
+    /// （`{credentials:'omit'}`）、引号是全角（`{webView:“true”}`）、
+    /// 甚至塞变量（`{bookId:BID}`）。宽容解析见 `optionObject(from:)`。
     static func parseURLRule(_ rule: String) -> (url: String, options: HTTPRequestOptions) {
         var text = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         var options = HTTPRequestOptions()
         guard !text.isEmpty else { return (text, options) }
 
-        if let range = text.range(of: ",{") {
-            let urlPart = String(text[..<range.lowerBound])
-            let optionPart = normalizeFullWidthJSON(String(text[range.lowerBound...].dropFirst()))
-            if let dictionary = optionPart.jsonObject as? [String: Any] {
+        if let split = splitTrailingOptions(text) {
+            if let dictionary = optionObject(from: split.options) {
                 options = parseOptions(dictionary)
-                text = urlPart
             }
+            // 选项即使解析不出来，地址也必须是干净的：残留 “,{...}”
+            // 会让请求 100% 失败（旧实现就是这么丢掉整条目录规则的，
+            // 界面表现就是「目录获取失败」）。
+            text = split.url
         }
         return (text.trimmingCharacters(in: .whitespacesAndNewlines), options)
+    }
+
+    /// 从规则里切出「地址 + 尾随选项」。
+    ///
+    /// 只有**括号配平**的那一段 `,{...}` 才算选项：正文规则里出现 `,{`
+    /// 是内容而不是选项，按首个 `,{` 无脑切会把地址切坏。
+    static func splitTrailingOptions(_ text: String) -> (url: String, options: String)? {
+        var searchEnd = text.endIndex
+        while let range = text.range(of: ",{", options: .backwards, range: text.startIndex..<searchEnd) {
+            let urlPart = String(text[..<range.lowerBound])
+            let optionText = String(text[range.lowerBound...].dropFirst())
+            if !urlPart.isEmpty && balancedBraces(optionText) {
+                return (urlPart, optionText)
+            }
+            searchEnd = range.lowerBound
+        }
+        return nil
+    }
+
+    /// `{...}` 是否括号配平，且外层恰好一对。
+    private static func balancedBraces(_ text: String) -> Bool {
+        let characters = Array(text)
+        guard characters.count >= 2, characters[0] == "{", characters[characters.count - 1] == "}" else {
+            return false
+        }
+        var depth = 0
+        var quote: Character?
+        var escaped = false
+        for (index, character) in characters.enumerated() {
+            if let closing = quote {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == closing {
+                    quote = nil
+                }
+                continue
+            }
+            if character == "\"" || character == "'" {
+                quote = character
+            } else if character == "“" {
+                quote = "”"
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth < 0 { return false }
+                if depth == 0 && index != characters.count - 1 { return false }
+            }
+        }
+        return depth == 0 && quote == nil
+    }
+
+    /// 按 JS 对象字面量的语义解析尾随选项。
+    ///
+    /// 顺序：严格 JSON → 改写宽松写法（键名补引号、单引号转双引号）
+    /// → 仍失败就当作「没有选项」。
+    static func optionObject(from text: String) -> [String: Any]? {
+        let normalized = normalizeFullWidthJSON(text)
+        if let dictionary = normalized.jsonObject as? [String: Any] {
+            return dictionary
+        }
+        return jsonObjectText(normalized).jsonObject as? [String: Any]
+    }
+
+    /// 把 JS 对象字面量改写成合法 JSON。
+    ///
+    /// 处理：键名不加引号（`{webView:true}` → `{"webView":true}`）、
+    /// 单引号字符串（`{credentials:'omit'}` → `{"credentials":"omit"}`）。
+    /// 值里若是变量（`{bookId:BID}`）无法求值，改写后依旧非法，
+    /// `JSONSerialization` 会拒绝，调用方按「没有选项」处理。
+    static func jsonObjectText(_ text: String) -> String {
+        let characters = Array(text)
+        var output = ""
+        var index = 0
+        var quote: Character?
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if let closing = quote {
+                if character == "\\" && closing == "\"" {
+                    output.append(character)
+                    if index + 1 < characters.count {
+                        output.append(characters[index + 1])
+                        index += 2
+                        continue
+                    }
+                } else if character == closing {
+                    output.append("\"")
+                    quote = nil
+                    index += 1
+                    continue
+                } else if character == "\"" {
+                    output.append("\\")
+                }
+                output.append(character)
+                index += 1
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                output.append("\"")
+                quote = character
+                index += 1
+                continue
+            }
+
+            if character == "_" || character == "$" || character.isLetter {
+                var end = index + 1
+                while end < characters.count {
+                    let next = characters[end]
+                    if next == "_" || next == "$" || next.isLetter || next.isNumber {
+                        end += 1
+                    } else {
+                        break
+                    }
+                }
+                var probe = end
+                while probe < characters.count && characters[probe].isWhitespace { probe += 1 }
+                if probe < characters.count && characters[probe] == ":" {
+                    output.append("\"")
+                    output.append(contentsOf: characters[index..<end])
+                    output.append("\"")
+                } else {
+                    output.append(contentsOf: characters[index..<end])
+                }
+                index = end
+                continue
+            }
+
+            output.append(character)
+            index += 1
+        }
+        return output
     }
 
     /// 把书源里误用的全角引号 / 冒号还原成 ASCII。

@@ -675,17 +675,18 @@ final class SourceEngine {
         var target = urlString
 
         // URL 内的 js 改写：url,{"js":"..."}
-        if let range = urlString.range(of: ",{\"js\"") {
-            target = String(urlString[..<range.lowerBound])
-            let optionText = String(urlString[range.lowerBound...].dropFirst())
-            if let dictionary = optionText.jsonObject as? [String: Any] {
-                for (key, value) in dictionary { options.headers[key] = RuleUtil.asString(value) ?? "" }
-                if let script = dictionary.str("js") {
-                    js.host.baseUrl = target
-                    _ = js.evaluate(script)
-                    if let mutated = js.host.baseUrl.nilIfBlank { target = mutated }
-                }
-            }
+        //
+        // 旧实现死认 `,{"js"` 这个带引号的字面量，源里写成 `,{js:"..."}`
+        // （键名不带引号）就整段识别不到，于是地址里残留 `,{...}`，
+        // 请求必然失败。这里改用与 parseURLRule 同一套宽容解析。
+        if let split = HTTPClient.splitTrailingOptions(urlString),
+           let dictionary = HTTPClient.optionObject(from: split.options),
+           let script = dictionary.str("js") {
+            target = split.url
+            for (key, value) in dictionary { options.headers[key] = RuleUtil.asString(value) ?? "" }
+            js.host.baseUrl = target
+            _ = js.evaluate(script)
+            if let mutated = js.host.baseUrl.nilIfBlank { target = mutated }
         }
 
         let analyzer = makeAnalyzer(content: nil, baseUrl: target, js: js)

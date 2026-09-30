@@ -620,11 +620,19 @@ final class JSEngine {
         let getLoginHeader: @convention(block) () -> String? = { [weak self] in self?.loginHeader }
         source.setObject(getLoginHeader, forKeyedSubscript: "getLoginHeader" as NSString)
 
-        let getLoginHeaderMap: @convention(block) () -> [String: String] = { [weak self] in
-            guard let header = self?.loginHeader, let dictionary = header.jsonObject as? [String: Any] else { return [:] }
+        // 同 getLoginInfoMap：书源按 java.util.Map 使用它（.get / .containsKey），
+        // 桥成普通对象会让这些调用全部变成 "is not a function"。
+        let getLoginHeaderMap: @convention(block) () -> JSValue = { [weak self] in
+            guard let self, let context = self.context,
+                  let header = self.loginHeader,
+                  let dictionary = header.jsonObject as? [String: Any] else { return JSValue() }
             var result: [String: String] = [:]
             for (key, value) in dictionary { result[key] = RuleUtil.asString(value) ?? "" }
-            return result
+            let wrap = context.objectForKeyedSubscript("__dxWrapMap")
+            guard let wrap, !wrap.isUndefined,
+                  let raw = JSValue(object: result, in: context),
+                  let mapped = wrap.call(withArguments: [raw]) else { return JSValue() }
+            return mapped
         }
         source.setObject(getLoginHeaderMap, forKeyedSubscript: "getLoginHeaderMap" as NSString)
 
@@ -645,8 +653,22 @@ final class JSEngine {
         }
         source.setObject(getLoginInfo, forKeyedSubscript: "getLoginInfo" as NSString)
 
-        let getLoginInfoMap: @convention(block) () -> [String: String] = { [weak self] in
-            self?.loginInfo ?? [:]
+        // 返回 java.util.Map 而不是普通 JS 对象。
+        //
+        // 书源写的是 `info.get('账号')`（Map 语义），而 Swift 字典桥过去
+        // 只是个普通对象，`info.get` 是 undefined ——
+        // 实测日志里刷屏的 "TypeError: info.get is not a function"
+        // 就是这里来的，登录脚本整段失效（微信读书 / 书旗等源依赖它）。
+        // 交给 JS 侧的 __dxWrapMap 包一层：同时支持 info.get(k) 与 info[k]。
+        let getLoginInfoMap: @convention(block) () -> JSValue = { [weak self] in
+            guard let self, let context = self.context else { return JSValue() }
+            let wrap = context.objectForKeyedSubscript("__dxWrapMap")
+            guard let wrap, !wrap.isUndefined,
+                  let raw = JSValue(object: self.loginInfo, in: context),
+                  let mapped = wrap.call(withArguments: [raw]) else {
+                return JSValue()
+            }
+            return mapped
         }
         source.setObject(getLoginInfoMap, forKeyedSubscript: "getLoginInfoMap" as NSString)
 

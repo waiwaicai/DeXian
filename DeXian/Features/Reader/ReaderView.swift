@@ -903,13 +903,6 @@ struct PagedReaderView: View {
         }
         return settings.readerTheme.textColor
     }
-
-    private var textColor: Color {
-        if settings.readerFollowsSystem {
-            return colorScheme == .dark ? Color(hex: 0xC9CDD4) : Color(hex: 0x2A2D33)
-        }
-        return Color(hex: settings.readerTheme.textColor)
-    }
 }
 
 // MARK: - 漫画阅读
@@ -1172,12 +1165,6 @@ struct ReaderSettingsSheet: View {
         .animation(.easeOut(duration: 0.12), value: settings.textIndent)
     }
 
-    /// 预览字体必须与当前阅读模式的真实渲染字体完全一致。
-    ///
-    /// 滚动模式渲染用 `settings.readingFont`，翻页模式用
-    /// `PageSplitter.uiFont`（保证分页测量与绘制同源）。
-    /// 预览若固定用其中一种，「等宽」这类两种构造方式度量有差异的字体
-    /// 就会看到与正文不一样的行宽和行高。
     /// 预览字体与阅读页同源。
     ///
     /// 两种阅读模式现在统一用 `PageSplitter.uiFont`（TextKit 渲染），

@@ -2058,6 +2058,39 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(engine.evaluateString("typeof javax.crypto.Cipher.getInstance"), "function")
     }
 
+    /// getLoginInfoMap / getLoginHeaderMap 的返回值必须支持 java.util.Map 语义。
+    ///
+    /// 书源写的是 `info.get('账号')`，而 Swift 的 [String: String] 桥到 JS
+    /// 只是个普通对象，`info.get` 是 undefined —— 实测日志里刷屏的
+    /// "TypeError: info.get is not a function" 就是这里来的，
+    /// 登录脚本因此整段失效（微信读书 / 书旗等源依赖它）。
+    func testWrappedMapSupportsJavaMapSemantics() {
+        let engine = JSEngine(host: JSEngine.Host())
+        // 包装一个普通 JS 对象，模拟 Swift 字典桥过来的形态
+        _ = engine.evaluate("var m = __dxWrapMap({'账号': 'u1', '密码': 'p1'});")
+        XCTAssertEqual(engine.evaluateString("m.get('账号')"), "u1")
+        XCTAssertEqual(engine.evaluateString("m.get('密码')"), "p1")
+        // 下标访问与 .get 必须看到同一份数据
+        XCTAssertEqual(engine.evaluateString("m['账号']"), "u1")
+        XCTAssertEqual(engine.evaluateString("m.size()"), "2")
+        XCTAssertEqual(engine.evaluateString("m.containsKey('账号') ? 'y' : 'n'"), "y")
+        XCTAssertEqual(engine.evaluateString("m.containsKey('没有') ? 'y' : 'n'"), "n")
+        // 不存在的键按 Java 语义返回 null，不是 undefined
+        XCTAssertEqual(engine.evaluateString("m.get('没有') === null ? 'null' : 'other'"), "null")
+        XCTAssertEqual(engine.evaluateString("m.getOrDefault('没有', 'd')"), "d")
+        // put 之后两种读法都要能看到新值
+        _ = engine.evaluate("m.put('手机', '138');")
+        XCTAssertEqual(engine.evaluateString("m.get('手机')"), "138")
+        XCTAssertEqual(engine.evaluateString("m['手机']"), "138")
+        XCTAssertEqual(engine.evaluateString("m.size()"), "3")
+        // keySet / remove 的基本行为
+        XCTAssertEqual(engine.evaluateString("m.keySet().length"), "3")
+        XCTAssertEqual(engine.evaluateString("m.remove('手机'); m.size()"), "2")
+        // 空值也不能崩
+        XCTAssertEqual(engine.evaluateString("__dxWrapMap(null).size()"), "0")
+        XCTAssertEqual(engine.evaluateString("__dxWrapMap(undefined).isEmpty() ? 'e' : 'n'"), "e")
+    }
+
     /// 书源注释里的 helper 要能被 eval 出来并调用（40 篇书源这么写）。
     func testHelperDefinedInSourceCommentIsCallable() {
         let engine = JSEngine(host: JSEngine.Host())
@@ -2213,6 +2246,41 @@ final class RssTests: XCTestCase {
         let parsed = HTTPClient.parseURLRule("https://a.com/toc,{webView:“true”}")
         XCTAssertEqual(parsed.url, "https://a.com/toc")
         XCTAssertTrue(parsed.options.webView, "全角引号也要能识别出 webView")
+    }
+
+    /// 尾随选项是 JS 对象字面量而不是严格 JSON。
+    ///
+    /// 对 821 个源扫描 `,(\{[^}]*\})` 的真实样本：
+    ///   🏷 起点小说   => {credentials:'omit'}
+    ///   🎨漫蛙       => {webView:true}
+    ///   📂台湾小说网  => {name:'打开网站',type:'button',action:'openSite()'}
+    ///   🏷书旗小说   => {bookId:BID,chapterId:CID}
+    /// 键名不带引号、值用单引号，旧实现按严格 JSON 解析失败后**整段不剥离**，
+    /// 地址里残留 `,{...}`，请求必然失败 —— 界面表现就是「目录获取失败」。
+    func testParseURLRuleAcceptsJSObjectLiteral() {
+        // 键名不带引号（🎨漫蛙）
+        let bare = HTTPClient.parseURLRule("https://a.com/toc,{webView:true}")
+        XCTAssertEqual(bare.url, "https://a.com/toc")
+        XCTAssertTrue(bare.options.webView)
+
+        // 单引号字符串（🏷 起点小说）
+        let single = HTTPClient.parseURLRule("https://a.com/api,{method:'POST',credentials:'omit'}")
+        XCTAssertEqual(single.url, "https://a.com/api")
+        XCTAssertEqual(single.options.method, "POST")
+
+        // 值里是变量就无法求值，但地址必须切干净（🏷书旗小说）
+        let variable = HTTPClient.parseURLRule("https://a.com/api,{bookId:BID,chapterId:CID}")
+        XCTAssertEqual(variable.url, "https://a.com/api")
+
+        // 单引号里含中文与逗号（📂台湾小说网）
+        let quoted = HTTPClient.parseURLRule("https://a.com/x,{name:'打开网站',type:'button'}")
+        XCTAssertEqual(quoted.url, "https://a.com/x")
+    }
+
+    /// 括号不配平的 `,{` 属于正文内容，不能当成选项切掉。
+    func testParseURLRuleKeepsUnbalancedBraceComma() {
+        let parsed = HTTPClient.parseURLRule("https://a.com/body,{未配平")
+        XCTAssertEqual(parsed.url, "https://a.com/body,{未配平")
     }
 
 }
