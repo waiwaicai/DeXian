@@ -401,9 +401,18 @@ extension JSEngine {
             guard !url.isEmpty else { return }
             _ = self?.waitForUserAction(url: url, title: JSEngine.stringFrom(titleValue))
         }
-        for name in ["showReadingBrowser", "startBrowserDp", "openWeb", "openBook"] {
+        for name in ["showReadingBrowser", "startBrowserDp", "openBook"] {
             java.setObject(openBrowser, forKeyedSubscript: name as NSString)
         }
+
+        // Legado 的 openWeb 只打开网页（例如跳过验证 / 登录），不等待返回值。
+        // 阻塞弹窗会让短剧源在播放前看起来像“需要验证”。
+        let openWeb: @convention(block) (JSValue) -> Void = { value in
+            let target = JSEngine.stringFrom(value).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else { return }
+            Log.debugLog("JS", "openWeb 已跳过：\(target)")
+        }
+        java.setObject(openWeb, forKeyedSubscript: "openWeb" as NSString)
 
         // java.openVideoPlayer(url, title, float?)：把直链交给界面播放。
         let openVideo: @convention(block) (JSValue, JSValue, JSValue) -> Void = { [weak self] urlValue, titleValue, _ in

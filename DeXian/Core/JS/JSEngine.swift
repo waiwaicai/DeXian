@@ -703,8 +703,8 @@ final class JSEngine {
             guard let self else { return JSValue() }
             if second.isUndefined || second.isNull {
                 guard let context = self.context else { return JSValue() }
-                let value = self.host.variables[JSEngine.stringFrom(first)]
-                return value.map { JSValue(object: $0, in: context) } ?? JSValue()
+                let value = self.host.variables[JSEngine.stringFrom(first)] ?? ""
+                return JSValue(object: value, in: context)
             }
             return self.connect(url: JSEngine.stringFrom(first), header: second, method: "GET", body: nil)
         }
@@ -1038,8 +1038,8 @@ final class JSEngine {
         }
         source.setObject(put, forKeyedSubscript: "put" as NSString)
 
-        let get: @convention(block) (String) -> String? = { [weak self] name in
-            self?.host.variables[name]
+        let get: @convention(block) (String) -> String = { [weak self] name in
+            self?.host.variables[name] ?? ""
         }
         source.setObject(get, forKeyedSubscript: "get" as NSString)
 
@@ -1215,8 +1215,8 @@ final class JSEngine {
         // 缺失时 undefined != 0 恒为 true —— 走进「不在书架」的分支。
         book.setObject(host.bookOrder, forKeyedSubscript: "order" as NSString)
 
-        let getBookVariable: @convention(block) (String) -> String? = { [weak self] name in
-            self?.host.variables[name]
+        let getBookVariable: @convention(block) (String) -> String = { [weak self] name in
+            self?.host.variables[name] ?? ""
         }
         book.setObject(getBookVariable, forKeyedSubscript: "getVariable" as NSString)
 
@@ -1382,8 +1382,8 @@ final class JSEngine {
         }
 
 
-        let getChapterVariable: @convention(block) (String) -> String? = { [weak self] name in
-            self?.host.variables[name]
+        let getChapterVariable: @convention(block) (String) -> String = { [weak self] name in
+            self?.host.variables[name] ?? ""
         }
         chapter.setObject(getChapterVariable, forKeyedSubscript: "getVariable" as NSString)
 
@@ -1483,7 +1483,7 @@ final class JSEngine {
     private func setupCache(_ context: JSContext) {
         let cacheObject = JSEngine.newObject(in: context)
 
-        let get: @convention(block) (String) -> String? = { [weak self] name in self?.cache[name] }
+        let get: @convention(block) (String) -> String = { [weak self] name in self?.cache[name] ?? "" }
         cacheObject.setObject(get, forKeyedSubscript: "get" as NSString)
 
         let put: @convention(block) (String, JSValue, JSValue) -> Void = { [weak self] name, value, _ in
@@ -1496,7 +1496,7 @@ final class JSEngine {
         }
         cacheObject.setObject(delete, forKeyedSubscript: "delete" as NSString)
 
-        let getFile: @convention(block) (String) -> String? = { [weak self] name in self?.cache[name] }
+        let getFile: @convention(block) (String) -> String = { [weak self] name in self?.cache[name] ?? "" }
         cacheObject.setObject(getFile, forKeyedSubscript: "getFile" as NSString)
 
         let putFile: @convention(block) (String, JSValue, JSValue) -> Void = { [weak self] name, value, _ in
@@ -1509,7 +1509,7 @@ final class JSEngine {
         }
         cacheObject.setObject(putMemory, forKeyedSubscript: "putMemory" as NSString)
 
-        let getFromMemory: @convention(block) (String) -> String? = { [weak self] name in self?.cache[name] }
+        let getFromMemory: @convention(block) (String) -> String = { [weak self] name in self?.cache[name] ?? "" }
         cacheObject.setObject(getFromMemory, forKeyedSubscript: "getFromMemory" as NSString)
 
         let deleteMemory: @convention(block) (String) -> Void = { [weak self] name in

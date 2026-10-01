@@ -2759,6 +2759,31 @@ final class RssTests: XCTestCase {
         }
     }
 
+    /// `java.get('未保存变量')` / `cache.get('未保存键')` 必须返回空串。
+    ///
+    /// Linpx 等源会写 `JSON.parse(String(java.get('util')))`；undefined 会被
+    /// String() 转成 "undefined"，再触发 JSON Parse error，整页发现内容失败。
+    func testMissingVariablesAndCacheReturnEmptyString() {
+        let engine = JSEngine(host: JSEngine.Host())
+        XCTAssertEqual(engine.evaluateString("String(java.get('util'))"), "")
+        XCTAssertEqual(engine.evaluateString("typeof java.get('util')"), "string")
+        XCTAssertEqual(engine.evaluateString("String(cache.get('missing'))"), "")
+        XCTAssertEqual(engine.evaluateString("String(cache.getFromMemory('missing'))"), "")
+    }
+
+    /// `java.openWeb` 是打开网页，不等待用户操作。旧实现复用阻塞验证框，
+    /// 会让黄豆短剧这类源在播放前弹“需要验证”。
+    func testOpenWebDoesNotBlockUserAction() {
+        let engine = JSEngine(host: JSEngine.Host())
+        var waitCount = 0
+        engine.awaitUserAction = { _, _ in
+            waitCount += 1
+            return "blocked"
+        }
+        _ = engine.evaluateString("java.openWeb('https://example.com/')")
+        XCTAssertEqual(waitCount, 0)
+    }
+
     /// 两个探测型 API 必须**保持未定义**，否则源会走错分支。
     ///
     /// - `java.qread`：源阅专有，141 个源写

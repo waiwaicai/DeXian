@@ -347,10 +347,15 @@ extension JSEngine {
     // MARK: - 网络扩展
 
     private func installNetworkExtras(_ java: JSValue) {
-        // java.webView(html, url, ...) —— 需要真实 WebView 才能执行页面脚本。
-        // 这里退化为「把传入的 HTML 当作响应文本」，而不是抛异常让整条规则链断掉。
-        let webView: @convention(block) (JSValue, JSValue) -> String = { htmlValue, _ in
-            JSEngine.stringFrom(htmlValue)
+        // java.webView(html, url, ...) 的目标是拿到可解析的页面 HTML。没有
+        // 真实 WebView 时，至少按 URL 发起一次普通请求；很多站点首屏数据
+        // 不依赖脚本执行，仍然能被 Linpx 这类规则解析。
+        let webView: @convention(block) (JSValue, JSValue) -> String = { [weak self] htmlValue, urlValue in
+            guard let self else { return JSEngine.stringFrom(htmlValue) }
+            let target = JSEngine.stringFrom(urlValue).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else { return JSEngine.stringFrom(htmlValue) }
+            return self.connect(url: target, header: nil, method: "GET", body: nil)
+                .objectForKeyedSubscript("__text")?.toString() ?? ""
         }
         java.setObject(webView, forKeyedSubscript: "webView" as NSString)
         java.setObject(webView, forKeyedSubscript: "webview" as NSString)

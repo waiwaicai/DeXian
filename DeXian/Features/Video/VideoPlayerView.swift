@@ -18,6 +18,9 @@ struct VideoPlayerView: View {
     private var isFullScreen: Bool { viewModel.isVideoFullScreen }
     /// 控制层显隐。播放中自动隐藏，点一下唤出。
     @State private var showControls = true
+    @State private var showGestureHint = true
+    @State private var hasShownGestureHint = false
+    @State private var hintTask: Task<Void, Never>?
     /// 手势进行中的浮层提示（快进 / 亮度 / 音量）
     @State private var hud: HUD?
     /// 手势开始时的基准值：亮度、音量、进度都要从「按下那一刻」算偏移量
@@ -109,6 +112,7 @@ struct VideoPlayerView: View {
         // 退出页面务必收回横屏许可，否则书架会跟着转
         .onDisappear {
             hideTask?.cancel()
+            hintTask?.cancel()
             controller.stop()
             if isFullScreen { DeXianAppDelegate.apply(landscape: false) }
         }
@@ -147,6 +151,18 @@ struct VideoPlayerView: View {
             }
 
             if let hud { hudView(hud) }
+
+            if showGestureHint {
+                Text("轻点屏幕显示 / 隐藏控制；左右滑快进，左亮度右音量")
+                    .font(.themeCaption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, Theme.Spacing.lg)
+                    .padding(.vertical, Theme.Spacing.sm)
+                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, immersive ? Theme.Spacing.xl : Theme.Spacing.md)
+                    .allowsHitTesting(false)
+            }
 
             if showControls {
                 controlsOverlay(immersive: immersive)
@@ -197,7 +213,7 @@ struct VideoPlayerView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { toggleControls() }
                 .gesture(
-                    DragGesture(minimumDistance: 12)
+            DragGesture(minimumDistance: 8)
                         .onChanged { value in
                             if gestureStartDirection == nil {
                                 beginGesture(at: value.startLocation, in: size)
@@ -356,6 +372,7 @@ struct VideoPlayerView: View {
                     }
                 )
                 .tint(.white)
+                .frame(height: 34)
 
                 HStack {
                     Text(controller.currentTimeText)
@@ -363,13 +380,14 @@ struct VideoPlayerView: View {
                     Text(controller.durationText)
                     Spacer()
                     Button {
-                        Task { await viewModel.goPrevious() }
+                        toggleFullScreen()
                     } label: {
-                        Label("上一集", systemImage: "backward.end.fill")
+                        Label("全屏", systemImage: "arrow.up.left.and.arrow.down.right")
                             .font(.themeCaption)
                             .foregroundStyle(.white)
                     }
                     .buttonStyle(.plain)
+
                     Button {
                         Task { await viewModel.goNext() }
                     } label: {
@@ -395,7 +413,23 @@ struct VideoPlayerView: View {
 
     private func toggleControls() {
         withAnimation(.easeOut(duration: 0.18)) { showControls.toggle() }
-        if showControls { scheduleHideControls() } else { cancelHideControls() }
+        if showControls {
+            if hasShownGestureHint {
+                scheduleHideControls()
+            } else {
+                hasShownGestureHint = true
+                hintTask?.cancel()
+                hintTask = Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        withAnimation(.easeOut(duration: 0.25)) { showGestureHint = false }
+                    }
+                }
+            }
+        } else {
+            cancelHideControls()
+        }
     }
 
     /// 播放中 4 秒后自动收起；暂停时保持常显（用户多半正要操作）
