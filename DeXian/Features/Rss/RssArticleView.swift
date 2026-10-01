@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 /// 文章阅读页。
 /// 正文按订阅源的 ruleContent 抽取；没有正文规则时直接展示网页文本，
@@ -16,11 +17,22 @@ struct RssArticleView: View {
     @State private var state: LoadState = .loading
     @State private var blocks: [RssBlock] = []
 
+    @State private var forceWebView = false
+
+    private var shouldUseWebView: Bool {
+        guard let sourceId, let source = rss.source(id: sourceId) else { return false }
+        return source.needsWebFallback
+    }
+
     enum LoadState: Equatable {
         case loading, loaded, failed(String)
     }
 
     var body: some View {
+        if shouldUseWebView || forceWebView {
+            RSSWebView(urlString: article.link)
+                .ignoresSafeArea(.container, edges: .bottom)
+        } else {
         ZStack {
             Color(hex: readerPalette.background).ignoresSafeArea()
 
@@ -72,6 +84,7 @@ struct RssArticleView: View {
         }
         .task(id: article.id) {
             await load()
+        }
         }
     }
 
@@ -165,6 +178,7 @@ struct RssArticleView: View {
     // MARK: 加载
 
     private func load() async {
+        if shouldUseWebView { return }
         if case .loaded = state { return }
         state = .loading
         guard let sourceId, let source = rss.source(id: sourceId) else {
@@ -175,6 +189,7 @@ struct RssArticleView: View {
             let html = try await RssEngine(source: source)
                 .articleContent(link: article.link, title: article.title)
             blocks = RssContentRenderer.render(html: html, baseUrl: article.link)
+            if blocks.isEmpty { forceWebView = true }
             state = .loaded
         } catch {
             state = .failed((error as? LocalizedError)?.errorDescription ?? SourceError.describe(error))
@@ -186,6 +201,25 @@ struct RssArticleView: View {
 enum RssBlock {
     case text(String)
     case image(String)
+}
+
+/// 用于 singleUrl / JS 渲染 / 表单验证类订阅源。
+/// 这类页面不是静态 HTML，交给系统 WebView 保留登录态和脚本执行。
+struct RSSWebView: UIViewRepresentable {
+    let urlString: String
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.allowsBackForwardNavigationGestures = true
+        if let url = URL(string: urlString) {
+            view.load(URLRequest(url: url))
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
 /// 把订阅源返回的正文（HTML 或纯文本）转成可渲染的块序列。

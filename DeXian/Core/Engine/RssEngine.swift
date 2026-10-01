@@ -99,9 +99,47 @@ final class RssEngine {
         let content = try await fetch(urlString: parsed.url, options: options)
         guard !source.ruleContent.trimmed.isEmpty else { return content }
 
+        // 凹凸吧这类源用 HTML 模板声明正文，其中 `{{@@selector@html}}`
+        // 是插入解析结果，而不是一条普通抽取规则。AnalyzeRule 只能返回文本，
+        // 会丢掉 img/a/iframe；这里按模板片段单独解析。
+        if source.ruleContent.contains("{{") {
+            return renderContentTemplate(from: content, baseUrl: parsed.url, js: js)
+        }
+
         let contentAnalyzer = makeAnalyzer(content: content, baseUrl: parsed.url, js: js)
         let value = contentAnalyzer.string(source.ruleContent)
         return value.isBlank ? content : value
+    }
+
+    private func renderContentTemplate(from content: String, baseUrl: String, js: JSEngine) -> String {
+        let analyzer = makeAnalyzer(content: content, baseUrl: baseUrl, js: js)
+        let raw = analyzer.string("{{@@#rawContent@html}}")
+        let template = source.ruleContent
+        var result = ""
+        var cursor = template.startIndex
+        while let range = template.range(of: "{{", range: cursor..<template.endIndex) {
+            result += template[cursor..<range.lowerBound]
+            guard let close = template.range(of: "}}", range: range.upperBound..<template.endIndex) else {
+                result += template[range.lowerBound...]
+                cursor = template.endIndex
+                break
+            }
+            let expression = String(template[range.upperBound..<close.lowerBound])
+            let selector = expression.hasPrefix("@@") ? String(expression.dropFirst(2)) : expression
+            let pieces = selector.components(separatedBy: "@")
+            let rule = pieces.first ?? selector
+            let outputMode = pieces.count > 1 ? pieces[1].lowercased() : "text"
+            if rule == "#rawContent" {
+                result += raw
+            } else if outputMode.contains("html") || outputMode.contains("all") {
+                result += analyzer.string("{{@@\(rule)@html}}")
+            } else {
+                result += analyzer.string(rule)
+            }
+            cursor = close.upperBound
+        }
+        result += template[cursor...]
+        return result.isBlank ? raw : result
     }
 
     // MARK: 搜索
@@ -205,14 +243,33 @@ final class RssEngine {
 
     private func fetch(urlString: String, options: HTTPRequestOptions) async throws -> String {
         guard !urlString.isBlank else { throw SourceError.emptyURL }
-        let response = try await HTTPClient.shared.request(
-            urlString: urlString,
-            options: options,
-            sourceKey: source.enabledCookieJar ? source.id : nil,
-            defaultHeaders: headers,
-            base: source.url.trimmed.isEmpty ? nil : source.url
-        )
-        return response.text
+        do {
+            let response = try await HTTPClient.shared.request(
+                urlString: urlString,
+                options: options,
+                sourceKey: source.enabledCookieJar ? source.id : nil,
+                defaultHeaders: headers,
+                base: source.url.trimmed.isEmpty ? nil : source.url
+            )
+            return response.text
+        } catch {
+            // 一批订阅源仍声明 http://，但站点已只支持 https://。
+            // 只在第一次请求失败时升级重试，避免正常请求翻倍。
+            guard let url = URL(string: urlString), url.scheme?.lowercased() == "http",
+                  let upgraded = URLComponents(url: url, resolvingAgainstBaseURL: false).map({
+                      var components = $0
+                      components.scheme = "https"
+                      return components.string
+                  }) else { throw error }
+            let response = try await HTTPClient.shared.request(
+                urlString: upgraded,
+                options: options,
+                sourceKey: source.enabledCookieJar ? source.id : nil,
+                defaultHeaders: headers,
+                base: source.url.trimmed.isEmpty ? nil : source.url
+            )
+            return response.text
+        }
     }
 
     private func parseHeaders() -> [String: String] {
@@ -255,6 +312,10 @@ final class RssEngine {
 
         let js = JSEngine(host: host)
         js.src = (content as? String) ?? ""
+        js.sourceVariable = SourceVariableStore.shared[source.id] ?? ""
+        js.onVariableChanged = { value in
+            SourceVariableStore.shared[source.id] = value
+        }
         js.host.resolveString = { [weak js] rule, target, _ in
             guard let js else { return "" }
             return SourceEngine.makeAnalyzer(

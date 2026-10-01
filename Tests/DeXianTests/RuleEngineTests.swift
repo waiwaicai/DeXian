@@ -1395,6 +1395,74 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(updated.ruleArticles, ".new")
     }
 
+    /// singleUrl 且没有正文/列表规则的源，必须保留完整网页入口，
+    /// 由 WebView 渲染；不要把站点导航抽成一堆空壳文章。
+    func testSingleUrlRssFallsBackToWebViewEntry() {
+        let source = RssSource(dict: [
+            "sourceName": "猫咪社区", "sourceUrl": "https://cat.example/list.html",
+            "singleUrl": true
+        ])
+        XCTAssertTrue(source.needsWebFallback)
+
+        let ruleSource = RssSource(dict: [
+            "sourceName": "规则源", "sourceUrl": "https://example.com",
+            "singleUrl": true, "ruleArticles": ".item"
+        ])
+        XCTAssertFalse(ruleSource.needsWebFallback)
+    }
+
+    /// 凹凸吧等图集源用 HTML 模板声明正文，`{{@@selector@html}}`
+    /// 是插入解析结果。模板不能交给普通文本抽取规则。
+    func testRuleContentTemplatePreservesInterpolation() throws {
+        let html = """
+        <article><h1>图集标题</h1><div class="images"><img src="/1.jpg"><img src="/2.jpg"></div></article>
+        """
+        let source = RssSource(dict: [
+            "sourceName": "图集源", "sourceUrl": "https://photo.example/post/1.html",
+            "ruleContent": "<h1>{{@@h1@all}}</h1>{{@@.images img@html}}"
+        ])
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let raw = analyzer.string("{{@@#rawContent@html}}")
+        XCTAssertTrue(raw.contains("images"))
+        XCTAssertTrue(source.ruleContent.contains("{{@@.images img@html}}"))
+    }
+
+    /// 已迁移 HTTPS 但仍声明 HTTP 的视频 API 源，需要失败后自动升级重试。
+    func testHTTPURLUpgrade() {
+        let original = "http://video.example/api.php/provide/vod/?ac=list&at=json"
+        let url = try? XCTUnwrap(URL(string: original))
+        var components = try? XCTUnwrap(URLComponents(url: url!, resolvingAgainstBaseURL: false))
+        components?.scheme = "https"
+        XCTAssertEqual(components?.string, "https://video.example/api.php/provide/vod/?ac=list&at=json")
+    }
+
+    /// 表单型 RSS 源通过 source.getVariable() 保存分类/频道选择，
+    /// 每次新建 JS 引擎都必须注入持久化变量。
+    func testRssSourceVariablePersistedAcrossEngines() {
+        let source = RssSource(dict: [
+            "sourceName": "变量源", "sourceUrl": "https://form.example",
+            "sortUrl": "频道::/list?channel={{source.getVariable()}}"
+        ])
+        SourceVariableStore.shared[source.id] = "drama"
+        XCTAssertEqual(SourceVariableStore.shared[source.id], "drama")
+    }
+
+    /// 合集里同时出现书源和订阅源时，订阅源不能因为“也检测到书源”被丢弃。
+    func testImportResultWithMixedKeepsRssSources() {
+        let payload = """
+        [{"bookSourceName":"书源A","bookSourceUrl":"https://a.com",
+          "searchUrl":"/s?q={{key}}","ruleSearch":{"bookList":".i"}},
+         {"sourceName":"订阅A","sourceUrl":"https://b.com","ruleArticles":".item"}]
+        """
+        let result = SourceImporter.parse(text: payload, preferRss: true)
+        XCTAssertEqual(result.rssSources.count, 1)
+        XCTAssertEqual(result.sources.count, 1)
+        XCTAssertEqual(result.rssSources.first?.name, "订阅A")
+    }
+
     // MARK: 本轮加固回归
 
     /// 空地址的书不能撞 id：SearchBook.id 若只由「源+地址」组成，

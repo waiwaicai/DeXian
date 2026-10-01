@@ -170,7 +170,7 @@ enum SourceImporter {
                 result.warnings.append("文件读取失败")
                 return result
             }
-            return parse(text: Charset.decode(data))
+            return parse(text: Charset.decode(data), preferRss: preferRss)
         }
     }
 
@@ -198,7 +198,7 @@ enum SourceImporter {
             result.warnings.append("文件读取失败")
             return result
         }
-        return parse(text: Charset.decode(data))
+        return parse(text: Charset.decode(data), preferRss: preferRss)
     }
 
     // MARK: 结构提取

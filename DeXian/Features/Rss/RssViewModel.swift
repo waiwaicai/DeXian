@@ -27,6 +27,20 @@ final class RssViewModel: ObservableObject {
         selectedCategoryId = nil
         engine = RssEngine(source: source)
         currentListURL = RssSource.resolvedListURL(category: nil, source: source)
+        if source.needsWebFallback {
+            articles = [RssArticle(
+                title: "打开订阅网页",
+                link: source.url,
+                pubDate: "",
+                summary: source.comment,
+                imageUrl: source.icon,
+                origin: source.id,
+                originName: source.name
+            )]
+            isLoading = false
+            errorMessage = nil
+            return
+        }
         await reload()
     }
 

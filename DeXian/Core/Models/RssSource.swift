@@ -168,6 +168,15 @@ struct RssSource: Codable, Hashable, Identifiable {
 
     var hasSearch: Bool { !searchUrl.trimmed.isEmpty }
 
+    /// singleUrl 源本身就是一个完整网页，列表规则只是站点入口的兜底。
+    /// 与其解析站点主页拿一堆导航链接，不如把入口地址交给 WebView 渲染。
+    var needsWebFallback: Bool {
+        guard singleUrl || !startJs.trimmed.isEmpty else {
+            return !hasArticleRule && ruleContent.trimmed.isEmpty
+        }
+        return ruleArticles.trimmed.isEmpty && ruleContent.trimmed.isEmpty
+    }
+
     /// 解析 sortUrl 里的 "名称::相对地址" 列表
     var categories: [RssCategory] {
         var items: [RssCategory] = []
