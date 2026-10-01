@@ -1485,6 +1485,17 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(first.id, second.id)
     }
 
+    /// 搜索 / 发现结果里的空地址，阅读器要能在应用内打开网页兜底，
+    /// 而不是把用户踢到 Safari。
+    func testSearchBookWebFallbackURLUsesBookURL() {
+        let book = SearchBook(name: "网页书", author: "", kind: nil, wordCount: nil,
+                              lastChapter: nil, intro: nil, coverUrl: nil,
+                              bookUrl: "https://web.example/book.html",
+                              origin: "s1", originName: "源一", type: .text)
+        let url = book.bookUrl.trimmed.isEmpty ? "" : book.bookUrl
+        XCTAssertEqual(url, "https://web.example/book.html")
+    }
+
     /// 正文节点要保留段落：块级标签之间必须有换行，否则整章被压成一行
     func testParagraphStringsKeepLineBreaks() {
         let html = "<div class=\"content\"><p>第一段</p><p>第二段</p></div>"

@@ -18,6 +18,7 @@ struct RssArticleView: View {
     @State private var blocks: [RssBlock] = []
 
     @State private var forceWebView = false
+    @State private var showInAppBrowser = false
 
     private var shouldUseWebView: Bool {
         guard let sourceId, let source = rss.source(id: sourceId) else { return false }
@@ -261,3 +262,4 @@ enum RssContentRenderer {
         return blocks
     }
 }
+
