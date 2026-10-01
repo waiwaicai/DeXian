@@ -2350,8 +2350,7 @@ final class RssTests: XCTestCase {
     func testJavaGetOverloads() {
         let engine = JSEngine(host: JSEngine.Host())
         XCTAssertEqual(engine.evaluateString("typeof java.get"), "function")
-        XCTAssertEqual(engine.evaluateString("java.get('missing') === undefined || java.get('missing') === null ? 'empty' : 'value'"),
-                       "empty")
+        XCTAssertEqual(engine.evaluateString("String(java.get('missing'))"), "")
     }
 
     // MARK: 正文排版
