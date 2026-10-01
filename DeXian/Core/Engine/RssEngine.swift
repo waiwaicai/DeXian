@@ -311,9 +311,10 @@ final class RssEngine {
 
         let js = JSEngine(host: host)
         js.src = (content as? String) ?? ""
-        js.sourceVariable = SourceVariableStore.shared[source.id] ?? ""
+        let sourceID = source.id
+        js.sourceVariable = SourceVariableStore.shared[sourceID] ?? ""
         js.onVariableChanged = { value in
-            SourceVariableStore.shared[engine.source.id] = value
+            SourceVariableStore.shared[sourceID] = value
         }
         js.host.resolveString = { [weak js] rule, target, _ in
             guard let js else { return "" }
