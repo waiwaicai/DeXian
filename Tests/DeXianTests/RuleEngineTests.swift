@@ -1421,11 +1421,8 @@ final class RssTests: XCTestCase {
             "sourceName": "图集源", "sourceUrl": "https://photo.example/post/1.html",
             "ruleContent": "<h1>{{@@h1@all}}</h1>{{@@.images img@html}}"
         ])
-        let js = JSEngine(host: JSEngine.Host())
-        let analyzer = SourceEngine.makeAnalyzer(
-            content: html, baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
-        )
-        let raw = analyzer.string("{{@@#rawContent@html}}")
+        let analyzer = AnalyzeRule(content: html, baseUrl: source.url)
+        let raw = analyzer.string("{{@@article@html}}")
         XCTAssertTrue(raw.contains("images"))
         XCTAssertTrue(source.ruleContent.contains("{{@@.images img@html}}"))
     }
