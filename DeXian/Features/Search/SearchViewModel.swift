@@ -140,6 +140,7 @@ final class SearchViewModel: ObservableObject {
         let value = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         self.keyword = value
+        WebAuthPresenter.shared.beginRound()
 
         let candidates = filtered(sources)
         guard !candidates.isEmpty else {

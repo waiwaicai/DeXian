@@ -357,6 +357,7 @@ struct BookDetailView: View {
     private func load() async {
         isLoading = true
         errorMessage = nil
+        WebAuthPresenter.shared.beginRound()
         guard let source = sources.source(id: searchBook.origin) else {
             errorMessage = "书源不存在或已被删除"
             isLoading = false

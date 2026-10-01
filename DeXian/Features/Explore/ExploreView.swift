@@ -322,6 +322,7 @@ final class ExploreViewModel: ObservableObject {
         self.source = source
         selectedSourceId = source.id
         didBootstrap = false
+        WebAuthPresenter.shared.beginRound()
         await reloadCategories()
         books = []
         errorMessage = nil

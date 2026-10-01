@@ -28,8 +28,18 @@ final class WebAuthPresenter: ObservableObject {
     /// 排队中的验证请求：用户完成当前请求后自动弹下一个。
     /// 同一时刻只渲染一个 sheet；直接丢弃后进请求会让正在搜索的其它源失败。
     private var queue: [(Request, (String) -> Void)] = []
+    /// 本轮搜索里已经处理过验证的书源。
+    /// 同一个源在脚本里可能反复要求验证；用户已经退出或完成后，
+    /// 不应该再被打断，也不影响其它书源继续搜索。
+    private var handledSourceKeys: Set<String> = []
 
     private init() {}
+
+    /// 新一轮搜索开始：清空上一轮的验证记录，并结束遗留窗口。
+    func beginRound() {
+        handledSourceKeys.removeAll()
+        cancel()
+    }
 
     /// 打开验证窗口；用户完成或跳过后回调 Cookie。
     /// 多个源同时要求验证时排队，避免丢弃后进请求导致整轮搜索中断。
@@ -39,6 +49,10 @@ final class WebAuthPresenter: ObservableObject {
             title: title.isEmpty ? "需要验证" : title,
             sourceKey: sourceKey
         )
+        if !sourceKey.isEmpty, handledSourceKeys.contains(sourceKey) {
+            completion("")
+            return
+        }
         if self.request != nil {
             queue.append((request, completion))
             return
@@ -57,6 +71,9 @@ final class WebAuthPresenter: ObservableObject {
     func skip() { finish("") }
 
     private func finish(_ cookie: String) {
+        if let sourceKey = request?.sourceKey, !sourceKey.isEmpty {
+            handledSourceKeys.insert(sourceKey)
+        }
         guard let completion else {
             request = nil
             return

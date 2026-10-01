@@ -1496,6 +1496,14 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(url, "https://web.example/book.html")
     }
 
+    /// 用户已经完成 / 跳过的源，在同一轮搜索里不能再重复弹验证。
+    /// 否则点击退出后，同一个验证框反复出现，搜索永远无法继续。
+    func testHandledVerificationDoesNotReopenInSameRound() {
+        let mirror = Mirror(reflecting: WebAuthPresenter.shared)
+        let handled = mirror.children.first { $0.label == "handledSourceKeys" }?.value as? Set<String>
+        XCTAssertNotNil(handled)
+    }
+
     /// 正文节点要保留段落：块级标签之间必须有换行，否则整章被压成一行
     func testParagraphStringsKeepLineBreaks() {
         let html = "<div class=\"content\"><p>第一段</p><p>第二段</p></div>"

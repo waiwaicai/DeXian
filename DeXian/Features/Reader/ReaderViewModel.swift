@@ -277,6 +277,7 @@ final class ReaderViewModel: ObservableObject {
     func loadContent(index: Int) async {
         guard chapters.indices.contains(index) else { return }
         currentIndex = index
+        WebAuthPresenter.shared.beginRound()
         // 换章即刷新书籍上下文：book.durChapterIndex / book.durChapterTitle
         // 必须指向**当前这一章**，书源据此判断 VIP / 购买 / 跳转。
         syncBookContext()
