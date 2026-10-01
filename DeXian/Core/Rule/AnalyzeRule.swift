@@ -375,7 +375,7 @@ final class AnalyzeRule {
         var value = RuleValue.strings([])
         for (isJS, piece) in pieces {
             if isJS {
-                let result = runInterpolatedJS(piece, previous: value.isEmpty ? nil : value.jsValue(elements: elements))
+                let result = runInterpolatedJS(piece, previous: value.isEmpty ? nil : value.jsValue(elements: elements && pieces.count > 1))
                 value = .raw(result ?? "")
             } else {
                 value = evaluateSegment(piece, previous: value, elements: elements)
@@ -442,7 +442,9 @@ final class AnalyzeRule {
             text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
         let (core, _) = RuleSyntax.splitReplaceRule(text)
-        // 列表规则：`result` 交给 JS 时保持元素形态（对齐 Legado 的 getElements）
+        // 列表规则：JSON / 节点结果保持元素形态（对齐 Legado 的 getElements）。
+        // JS 链后面的 `result.toArray()` 也能继续工作；但规则链已把
+        // 节点转换成 href / text 等字符串时，JS 必须拿到字符串。
         let value = evaluateChained(core, elements: true)
         var items: [Any] = []
 
@@ -593,18 +595,18 @@ final class AnalyzeRule {
 
         if lowered.hasPrefix("js:") {
             let script = String(text.dropFirst(3))
-            let result = runInterpolatedJS(script, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(script, previous: value.jsValue(elements: false))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("@js:") {
             let script = String(text.dropFirst(4))
-            let result = runInterpolatedJS(script, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(script, previous: value.jsValue(elements: false))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("<js>") {
             let (kind, body) = RuleSyntax.detectKind(text)
             guard kind == .javascript else { return value }
-            let result = runInterpolatedJS(body, previous: value.jsValue(elements: elements))
+            let result = runInterpolatedJS(body, previous: value.jsValue(elements: false))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("json:") {

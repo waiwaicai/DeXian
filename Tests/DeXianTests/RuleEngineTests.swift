@@ -1288,6 +1288,51 @@ final class RssTests: XCTestCase {
         )
     }
 
+    /// 订阅源字段规则里的 `result.replace` 必须拿到字符串。
+    ///
+    /// 真实订阅源（禁漫天堂）的规则是：
+    /// `tag.a.0@href@js:result.replace(...)`
+    /// 列表元素节点经过属性转换后是字符串；旧实现把 `elements: true`
+    /// 一路传给 JS 转换，导致 result 变成 HTMLNode，字段规则失效。
+    func testRssFieldJSReceivesStringResult() {
+        let html = """
+        <div class="list-col"><a href="/album/123">漫画</a></div>
+        """
+        let source = RssSource(dict: [
+            "sourceName": "字段脚本源", "sourceUrl": "https://example.com/",
+            "ruleArticles": "class.list-col",
+            "ruleLink": "tag.a.0@href@js:result.replace(/.*?album\\/(\\d+).*/g,\"/photo/$1\")"
+        ])
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: html, baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        let items = analyzer.listItems(source.ruleArticles)
+        XCTAssertEqual(items.count, 1)
+        let itemAnalyzer = SourceEngine.makeAnalyzer(
+            content: items[0], baseUrl: source.url, js: js, bookInfo: [:], chapterInfo: [:]
+        )
+        XCTAssertEqual(itemAnalyzer.string(source.ruleLink), "/photo/123")
+    }
+
+    /// 列表规则以 `@js:` 结尾时必须返回原始地址字符串数组。
+    ///
+    /// 对齐 Legado 的 `AnalyzeUrl.resolveJsUrl`：这种写法是“把当前地址
+    /// 转成带请求选项的最终地址”，不是元素列表。
+    func testListRuleFinalJSWithStringsReturnsURLs() {
+        let source = RssSource(dict: [
+            "sourceName": "URL脚本源", "sourceUrl": "https://example.com/"
+        ])
+        let js = JSEngine(host: JSEngine.Host())
+        let analyzer = SourceEngine.makeAnalyzer(
+            content: "https://example.com/page", baseUrl: source.url, js: js,
+            bookInfo: [:], chapterInfo: [:]
+        )
+        let items = analyzer.listItems("@js:result + \"/next\"")
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(RuleUtil.asString(items[0]), "https://example.com/page/next")
+    }
+
     func testRssSourceIsCodable() {
         let source = RssSource(dict: [
             "sourceName": "编码测试", "sourceUrl": "https://example.com",
@@ -2223,14 +2268,16 @@ final class RssTests: XCTestCase {
 
     // MARK: 列表规则给 JS 的 result 形态
 
-    /// 列表规则里 result 必须是元素对象：书源会写 result.toArray() / result.select()。
+    /// 列表规则的多段 JS 里 result 必须保持元素对象：订阅源会用
+    /// 第一段选出节点，再在连续 JS 段里调 result.toArray() / result.select()。
     func testListRuleExposesElementsToJS() {
         let html = "<ul><li><a href=\"/1\">一</a></li><li><a href=\"/2\">二</a></li></ul>"
         let js = JSEngine(host: JSEngine.Host())
         let analyzer = SourceEngine.makeAnalyzer(
             content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
         )
-        let items = analyzer.listItems("tag.li@js:result.toArray().map(function(el){return el.select('a').attr('href')})")
+        let rule = "tag.li<js>result</js><js>result.toArray().map(function(el){return el.select('a').attr('href')})</js>"
+        let items = analyzer.listItems(rule)
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(RuleUtil.asString(items[0]), "/1")
         XCTAssertEqual(RuleUtil.asString(items[1]), "/2")
@@ -2684,14 +2731,16 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(analyzer.string(".t p@text@js:result.split('\\n').length"), "2")
     }
 
-    /// 列表规则的 result 必须保持数组：书源写 result.toArray() / result.length。
+    /// 列表规则的多段 JS 里 result 必须保持数组：第一段先拿到选择结果，
+    /// 第二段才能检查数组形态并读取 result.length。
     func testListRuleResultStaysArray() {
         let json = "{\"items\":[{\"id\":1},{\"id\":2}]}"
         let js = JSEngine(host: JSEngine.Host())
         let analyzer = SourceEngine.makeAnalyzer(
             content: json, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
         )
-        let items = analyzer.listItems("$.items[*]@js:(Array.isArray(result) ? 'array' : 'other') + result.length")
+        let rule = "$.items[*]<js>result</js><js>(Array.isArray(result) ? 'array' : 'other') + result.length</js>"
+        let items = analyzer.listItems(rule)
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(RuleUtil.asString(items[0]), "array2")
     }
