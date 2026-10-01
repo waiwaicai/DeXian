@@ -77,7 +77,9 @@ final class SearchViewModel: ObservableObject {
     /// 也就是说一个源最坏要 60s 才走完。原先设 40s，等于把
     /// 「慢但完全能用」的源提前掐断，用户看到的就是「怎么搜都超时」。
     /// 70s 只用来兜住真正卡死的源（脚本死循环、回调挂起）。
-    private let perSourceTimeout: TimeInterval = 70
+    /// 验证窗口可能等待用户；搜索不能在 70 秒时把这种源取消。
+    /// 拉长到 10 分钟仅作为真正卡死的兜底，正常请求仍然由 HTTP 30 秒超时。
+    private let perSourceTimeout: TimeInterval = 600
 
     /// 结果卡片的渲染上限。
     ///

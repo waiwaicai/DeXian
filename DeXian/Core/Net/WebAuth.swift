@@ -25,15 +25,26 @@ final class WebAuthPresenter: ObservableObject {
 
     @Published var request: Request?
     private var completion: ((String) -> Void)?
+    /// 排队中的验证请求：用户完成当前请求后自动弹下一个。
+    /// 同一时刻只渲染一个 sheet；直接丢弃后进请求会让正在搜索的其它源失败。
+    private var queue: [(Request, (String) -> Void)] = []
 
     private init() {}
 
-    /// 打开验证窗口；用户完成或取消后回调最终 Cookie。
-    /// 同一时刻只允许一个窗口，已有的先以空结果结束，避免脚本互相等待。
+    /// 打开验证窗口；用户完成或跳过后回调 Cookie。
+    /// 多个源同时要求验证时排队，避免丢弃后进请求导致整轮搜索中断。
     func present(url: String, title: String, sourceKey: String, completion: @escaping (String) -> Void) {
-        finish("")
+        let request = Request(
+            url: url,
+            title: title.isEmpty ? "需要验证" : title,
+            sourceKey: sourceKey
+        )
+        if self.request != nil {
+            queue.append((request, completion))
+            return
+        }
         self.completion = completion
-        request = Request(url: url, title: title.isEmpty ? "需要验证" : title, sourceKey: sourceKey)
+        self.request = request
     }
 
     /// 用户点「完成」：回传当前页 Cookie
@@ -41,6 +52,9 @@ final class WebAuthPresenter: ObservableObject {
 
     /// 用户点「取消」
     func cancel() { finish("") }
+
+    /// 用户明确选择跳过：只结束当前源，队列里其它验证继续处理。
+    func skip() { finish("") }
 
     private func finish(_ cookie: String) {
         guard let completion else {
@@ -50,6 +64,11 @@ final class WebAuthPresenter: ObservableObject {
         self.completion = nil
         request = nil
         completion(cookie)
+        if !queue.isEmpty {
+            let next = queue.removeFirst()
+            self.completion = next.1
+            self.request = next.0
+        }
     }
 }
 
