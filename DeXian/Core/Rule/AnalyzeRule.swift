@@ -595,18 +595,18 @@ final class AnalyzeRule {
 
         if lowered.hasPrefix("js:") {
             let script = String(text.dropFirst(3))
-            let result = runInterpolatedJS(script, previous: value.jsValue(elements: false))
+            let result = runInterpolatedJS(script, previous: Self.jsResultInput(value, elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("@js:") {
             let script = String(text.dropFirst(4))
-            let result = runInterpolatedJS(script, previous: value.jsValue(elements: false))
+            let result = runInterpolatedJS(script, previous: Self.jsResultInput(value, elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("<js>") {
             let (kind, body) = RuleSyntax.detectKind(text)
             guard kind == .javascript else { return value }
-            let result = runInterpolatedJS(body, previous: value.jsValue(elements: false))
+            let result = runInterpolatedJS(body, previous: Self.jsResultInput(value, elements: elements))
             return .raw(result ?? "")
         }
         if lowered.hasPrefix("json:") {
@@ -651,6 +651,14 @@ final class AnalyzeRule {
         }
 
         return extractField(text, from: value)
+    }
+
+    /// 字段规则里的 JS 拿字符串；列表规则里只有节点选择结果保持元素，
+    /// JSON 数组 / 字符串列表仍给字符串。这样能同时兼容
+    /// `href@js:result.replace(...)` 和 `tag.li@js:result.toArray()`。
+    private static func jsResultInput(_ value: RuleValue, elements: Bool) -> Any? {
+        if case .nodes = value, elements { return value.jsValue(elements: true) }
+        return value.jsValue(elements: false)
     }
 
     private func extractField(_ field: String, from value: RuleValue) -> RuleValue {

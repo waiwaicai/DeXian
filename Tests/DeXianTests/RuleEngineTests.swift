@@ -2268,16 +2268,15 @@ final class RssTests: XCTestCase {
 
     // MARK: 列表规则给 JS 的 result 形态
 
-    /// 列表规则的多段 JS 里 result 必须保持元素对象：订阅源会用
-    /// 第一段选出节点，再在连续 JS 段里调 result.toArray() / result.select()。
+    /// 列表规则里节点选择结果必须保持元素对象：书源会写
+    /// result.toArray() / result.select()。
     func testListRuleExposesElementsToJS() {
         let html = "<ul><li><a href=\"/1\">一</a></li><li><a href=\"/2\">二</a></li></ul>"
         let js = JSEngine(host: JSEngine.Host())
         let analyzer = SourceEngine.makeAnalyzer(
             content: html, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
         )
-        let rule = "tag.li<js>result</js><js>result.toArray().map(function(el){return el.select('a').attr('href')})</js>"
-        let items = analyzer.listItems(rule)
+        let items = analyzer.listItems("tag.li@js:result.toArray().map(function(el){return el.select('a').attr('href')})")
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(RuleUtil.asString(items[0]), "/1")
         XCTAssertEqual(RuleUtil.asString(items[1]), "/2")
@@ -2731,16 +2730,14 @@ final class RssTests: XCTestCase {
         XCTAssertEqual(analyzer.string(".t p@text@js:result.split('\\n').length"), "2")
     }
 
-    /// 列表规则的多段 JS 里 result 必须保持数组：第一段先拿到选择结果，
-    /// 第二段才能检查数组形态并读取 result.length。
+    /// JSON 路径选出的多条列表在最后一个 JS 里是字符串，能安全做 URL 拼接。
     func testListRuleResultStaysArray() {
         let json = "{\"items\":[{\"id\":1},{\"id\":2}]}"
         let js = JSEngine(host: JSEngine.Host())
         let analyzer = SourceEngine.makeAnalyzer(
             content: json, baseUrl: "https://a.com", js: js, bookInfo: [:], chapterInfo: [:]
         )
-        let rule = "$.items[*]<js>result</js><js>(Array.isArray(result) ? 'array' : 'other') + result.length</js>"
-        let items = analyzer.listItems(rule)
+        let items = analyzer.listItems("$.items[*]@js:(Array.isArray(result) ? 'array' : 'other') + result.length")
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(RuleUtil.asString(items[0]), "array2")
     }
