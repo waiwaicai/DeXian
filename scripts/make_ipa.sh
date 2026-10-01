@@ -88,6 +88,14 @@ cp -R "$APP_PATH" "$WORK/Payload/"
 # 移除旧的签名残留，便于自签工具处理
 rm -rf "$WORK/Payload/$SCHEME.app/_CodeSignature" 2>/dev/null || true
 
+# sideLoad 版本核对：xcodegen 在归档时没有展开 MARKETING_VERSION，
+# 这里直接写入实际短版本，避免侧载工具把它当成旧包。
+PLIST="$WORK/Payload/$SCHEME.app/Info.plist"
+if [ -f "$PLIST" ]; then
+  SHORT_VERSION="1.0.23"
+  plutil -replace CFBundleShortVersionString -string "$SHORT_VERSION" "$PLIST"
+fi
+
 ( cd "$WORK" && zip -qry "$OUTPUT_DIR/$IPA_NAME" Payload )
 
 IPA_BYTES="$(wc -c < "$OUTPUT_DIR/$IPA_NAME" 2>/dev/null || echo 0)"
