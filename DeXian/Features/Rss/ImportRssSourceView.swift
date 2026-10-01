@@ -270,8 +270,8 @@ struct ImportRssSourceView: View {
         let merged = rss.add(result.rssSources)
         var message = "已导入 " + String(merged.added) + " 个订阅源"
         if merged.updated > 0 { message += "，更新 " + String(merged.updated) + " 个" }
-        if !result.bookSources.isEmpty {
-            message += "；同时检测到 " + String(result.bookSources.count) + " 个书源，请到「书源管理 → 导入书源」导入"
+        if !result.sources.isEmpty {
+            message += "；同时检测到 " + String(result.sources.count) + " 个书源，请到「书源管理 → 导入书源」导入"
         }
         finish(message, style: .success)
         appState.show(message, style: .success)

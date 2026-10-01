@@ -255,12 +255,11 @@ final class RssEngine {
         } catch {
             // 一批订阅源仍声明 http://，但站点已只支持 https://。
             // 只在第一次请求失败时升级重试，避免正常请求翻倍。
-            guard let url = URL(string: urlString), url.scheme?.lowercased() == "http",
-                  let upgraded = URLComponents(url: url, resolvingAgainstBaseURL: false).map({
-                      var components = $0
-                      components.scheme = "https"
-                      return components.string
-                  }) else { throw error }
+            guard let url = URL(string: urlString), url.scheme?.lowercased() == "http" else { throw error }
+            guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw error }
+            var upgradedComponents = components
+            upgradedComponents.scheme = "https"
+            guard let upgraded = upgradedComponents.string else { throw error }
             let response = try await HTTPClient.shared.request(
                 urlString: upgraded,
                 options: options,
@@ -314,7 +313,7 @@ final class RssEngine {
         js.src = (content as? String) ?? ""
         js.sourceVariable = SourceVariableStore.shared[source.id] ?? ""
         js.onVariableChanged = { value in
-            SourceVariableStore.shared[source.id] = value
+            SourceVariableStore.shared[engine.source.id] = value
         }
         js.host.resolveString = { [weak js] rule, target, _ in
             guard let js else { return "" }
