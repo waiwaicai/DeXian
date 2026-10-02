@@ -33,6 +33,19 @@ struct RssArticleView: View {
         if shouldUseWebView || forceWebView {
             RSSWebView(urlString: article.link)
                 .ignoresSafeArea(.container, edges: .bottom)
+                .navigationTitle(article.originName)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button {
+                            if let url = URL(string: article.link) ?? URL(string: RuleUtil.sanitizeURL(article.link)) {
+                                openURL(url)
+                            }
+                        } label: {
+                            Image(systemName: "safari")
+                        }
+                    }
+                }
         } else {
         ZStack {
             Color(hex: readerPalette.background).ignoresSafeArea()
@@ -193,8 +206,20 @@ struct RssArticleView: View {
             if blocks.isEmpty { forceWebView = true }
             state = .loaded
         } catch {
+            if Self.shouldFallbackToWebView(error) {
+                forceWebView = true
+                return
+            }
             state = .failed((error as? LocalizedError)?.errorDescription ?? SourceError.describe(error))
         }
+    }
+
+    /// 链接无法用 URLSession 抓取时回退到内嵌 WebView：
+    /// 非 http(s) scheme（unsupportedScheme）或 URLSession 的 -1002。
+    private static func shouldFallbackToWebView(_ error: Error) -> Bool {
+        if case NetworkError.unsupportedScheme = error { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorUnsupportedURL
     }
 }
 
@@ -214,13 +239,22 @@ struct RSSWebView: UIViewRepresentable {
         configuration.websiteDataStore = .default()
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
-        if let url = URL(string: urlString) {
+        if let url = Self.resolvedURL(urlString) {
             view.load(URLRequest(url: url))
         }
         return view
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    /// 对含空格 / 中文等字符的地址做百分号编码后再交给 WKWebView，
+    /// 避免 URL(string:) 直接返回 nil 导致页面不加载。
+    private static func resolvedURL(_ urlString: String) -> URL? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed) { return url }
+        return URL(string: RuleUtil.sanitizeURL(trimmed))
+    }
 }
 
 /// 把订阅源返回的正文（HTML 或纯文本）转成可渲染的块序列。

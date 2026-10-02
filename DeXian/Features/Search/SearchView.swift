@@ -6,7 +6,7 @@ struct SearchView: View {
     @EnvironmentObject private var sources: SourceStore
     @EnvironmentObject private var shelf: ShelfStore
 
-    @StateObject private var viewModel = SearchViewModel()
+    @EnvironmentObject private var viewModel: SearchViewModel
     @State private var input: String = ""
     @FocusState private var isFocused: Bool
 

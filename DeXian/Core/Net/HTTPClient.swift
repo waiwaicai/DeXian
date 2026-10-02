@@ -100,6 +100,11 @@ final class HTTPClient {
             throw NetworkError.invalidURL(urlString)
         }
 
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme != "http" && scheme != "https" {
+            throw NetworkError.unsupportedScheme(urlString)
+        }
+
         var request = URLRequest(url: url)
         request.httpMethod = options.method.uppercased()
         request.timeoutInterval = options.timeout
@@ -561,6 +566,11 @@ enum NetworkError: LocalizedError {
     case timeout
     case responseTooLarge(Int)
 
+    /// URL scheme 不被 URLSession 支持（非 http/https）。原先这类地址会走到
+    /// URLSession 才抛 NSURLErrorUnsupportedURL(-1002)，现在在 buildRequest
+    /// 提前拦截，调用方可据此回退到内嵌 WebView 而不是直接报错。
+    case unsupportedScheme(String)
+
     var errorDescription: String? {
         switch self {
         case .invalidURL(let value): return "链接无效：" + value
@@ -570,6 +580,7 @@ enum NetworkError: LocalizedError {
         case .timeout: return "请求超时"
         case .responseTooLarge(let bytes):
             return "内容过大（" + String(bytes / 1024 / 1024) + "MB），已中止"
+        case .unsupportedScheme(let value): return "链接格式不支持：" + value
         }
     }
 }

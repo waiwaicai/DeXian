@@ -25,6 +25,7 @@ struct DeXianApp: App {
                 .environmentObject(appState.rss)
                 .environmentObject(appState.shelf)
                 .environmentObject(appState.settings)
+                .environmentObject(appState.searchViewModel)
                 .preferredColorScheme(appState.settings.appearance.colorScheme)
                 .tint(Theme.Palette.brand)
                 // 写盘有 300ms 合并窗口；被挂起前必须刷一次，否则改动会丢

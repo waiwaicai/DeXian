@@ -6,8 +6,6 @@ struct RssHomeView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var rss: RssStore
 
-    @StateObject private var viewModel = RssViewModel()
-
     var body: some View {
         ZStack {
             Theme.ColorToken.background.ignoresSafeArea()
@@ -21,14 +19,10 @@ struct RssHomeView: View {
                     message: "订阅源可以订阅网站的文章、图片等内容。\n到「我的 → 订阅源管理」导入 yckceo 的 RSS 订阅源。"
                 )
             } else {
-                VStack(spacing: 0) {
-                    sourcePicker
-                    if !viewModel.categories.isEmpty { categoryPicker }
-                    articleList
-                }
+                sourceList
             }
         }
-        .navigationTitle(viewModel.sourceName.isEmpty ? "订阅" : viewModel.sourceName)
+        .navigationTitle("订阅")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -48,49 +42,47 @@ struct RssHomeView: View {
                 }
             }
         }
-        .task {
-            guard !rss.sources.isEmpty else { return }
-            if viewModel.selectedSourceId == nil,
-               let first = rss.enabledSources.first {
-                await viewModel.select(source: first)
-            }
-        }
     }
 
-    // MARK: 订阅源选择
+    // MARK: 订阅源竖版列表
 
-    private var sourcePicker: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Spacing.sm) {
+    private var sourceList: some View {
+        ScrollView {
+            LazyVStack(spacing: Theme.Spacing.sm) {
                 ForEach(rss.enabledSources) { source in
-                    Button {
-                        Task { await viewModel.select(source: source) }
+                    NavigationLink {
+                        RssSourceFeedView(source: source)
                     } label: {
-                        HStack(spacing: Theme.Spacing.xs) {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text(source.name)
-                                .font(.themeCaption)
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(viewModel.selectedSourceId == source.id
-                                         ? .white : Theme.ColorToken.textSecondary)
-                        .padding(.horizontal, Theme.Spacing.md)
-                        .padding(.vertical, Theme.Spacing.sm)
-                        .background(
-                            Capsule().fill(viewModel.selectedSourceId == source.id
-                                           ? Theme.Palette.brand : Theme.ColorToken.surface)
-                        )
-                        .overlay(
-                            Capsule().stroke(viewModel.selectedSourceId == source.id
-                                             ? Color.clear : Theme.ColorToken.separator, lineWidth: 0.8)
-                        )
+                        RssSourceRow(source: source)
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, Theme.Spacing.page)
-            .padding(.vertical, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.sm)
+        }
+    }
+}
+
+/// 订阅源详情：分类 + 文章列表（从订阅首页点击进入）。
+struct RssSourceFeedView: View {
+    let source: RssSource
+    @StateObject private var viewModel = RssViewModel()
+
+    var body: some View {
+        ZStack {
+            Theme.ColorToken.background.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                if !viewModel.categories.isEmpty { categoryPicker }
+                articleList
+            }
+        }
+        .navigationTitle(source.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            guard viewModel.selectedSourceId == nil else { return }
+            await viewModel.select(source: source)
         }
     }
 

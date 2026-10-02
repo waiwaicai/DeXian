@@ -9,6 +9,10 @@ final class AppState: ObservableObject {
     let shelf = ShelfStore()
     let settings = SettingsStore()
 
+    /// Owned by AppState so the WebAuth sheet present/dismiss
+    /// cannot recreate the search page view model and lose results.
+    let searchViewModel = SearchViewModel()
+
     /// 标签页选择
     @Published var selectedTab: RootView.Tab = .shelf
     /// 阅读页跳转目标
