@@ -32,6 +32,10 @@ final class WebAuthPresenter: ObservableObject {
     /// 同一个源在脚本里可能反复要求验证；用户已经退出或完成后，
     /// 不应该再被打断，也不影响其它书源继续搜索。
     private var handledSourceKeys: Set<String> = []
+    /// 用户完成当前验证后，允许短时间内继续处理同一源的后续验证。
+    /// 有些源每个分类 / 分页都会要求验证；「完成」不应等同于跳过。
+    private var completedAt: Date?
+    private let completedGraceInterval: TimeInterval = 20
 
     private init() {}
 
@@ -53,6 +57,9 @@ final class WebAuthPresenter: ObservableObject {
             completion("")
             return
         }
+        if let completedAt, Date().timeIntervalSince(completedAt) < completedGraceInterval {
+            self.completedAt = nil
+        }
         if self.request != nil {
             queue.append((request, completion))
             return
@@ -62,18 +69,28 @@ final class WebAuthPresenter: ObservableObject {
     }
 
     /// 用户点「完成」：回传当前页 Cookie
-    func complete(cookie: String) { finish(cookie) }
+    func complete(cookie: String) {
+        completedAt = Date()
+        finish(cookie)
+    }
 
     /// 用户点「取消」
-    func cancel() { finish("") }
+    func cancel() {
+        completedAt = nil
+        finish("")
+    }
 
     /// 用户明确选择跳过：只结束当前源，队列里其它验证继续处理。
-    func skip() { finish("") }
+    func skip() {
+        completedAt = nil
+        finish("")
+    }
 
     private func finish(_ cookie: String) {
         if let sourceKey = request?.sourceKey, !sourceKey.isEmpty {
             handledSourceKeys.insert(sourceKey)
         }
+        if cookie.isEmpty { completedAt = nil }
         guard let completion else {
             request = nil
             return

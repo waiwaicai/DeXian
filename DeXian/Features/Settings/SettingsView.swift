@@ -259,6 +259,7 @@ struct LogViewerView: View {
     /// 用户会以为按钮没生效而反复点。
     @State private var hint: String?
     @State private var showShare = false
+    @State private var exportURL: URL?
 
     var body: some View {
         List {
@@ -278,6 +279,11 @@ struct LogViewerView: View {
                         showShare = true
                     } label: {
                         Label("分享日志文本", systemImage: "square.and.arrow.up")
+                    }
+                    Button {
+                        exportTXT()
+                    } label: {
+                        Label("导出 TXT 文件", systemImage: "square.and.arrow.down")
                     }
                 } footer: {
                     Text("长按任意一条日志可单独复制。")
@@ -330,6 +336,9 @@ struct LogViewerView: View {
         .animation(.easeOut(duration: 0.18), value: hint)
         .sheet(isPresented: $showShare) {
             ShareTextView(text: plainLogText)
+        }
+        .sheet(item: $exportURL) { url in
+            ShareFileView(url: url)
         }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -407,6 +416,25 @@ struct LogViewerView: View {
         showHint(text.isEmpty ? "没有可复制的内容" : "已复制 " + String(text.count) + " 个字符")
     }
 
+    private func exportTXT() {
+        let text = plainLogText
+        guard !text.isEmpty else {
+            showHint("没有可导出的日志")
+            return
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "DeXian-debug-" + formatter.string(from: Date()) + ".txt"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try text.data(using: .utf8)?.write(to: url, options: .atomic)
+            exportURL = url
+            showHint("已生成 " + name)
+        } catch {
+            showHint("导出失败：" + error.localizedDescription)
+        }
+    }
+
     private func showHint(_ text: String) {
         hint = text
         Task {
@@ -430,4 +458,19 @@ struct ShareTextView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+/// 文件分享：导出 TXT 用真实文件，保存到“文件”或发送给微信 / 邮件。
+struct ShareFileView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+extension URL: Identifiable {
+    public var id: String { absoluteString }
 }

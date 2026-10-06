@@ -100,11 +100,6 @@ final class HTTPClient {
             throw NetworkError.invalidURL(urlString)
         }
 
-        let scheme = url.scheme?.lowercased() ?? ""
-        if scheme != "http" && scheme != "https" {
-            throw NetworkError.unsupportedScheme(urlString)
-        }
-
         var request = URLRequest(url: url)
         request.httpMethod = options.method.uppercased()
         request.timeoutInterval = options.timeout
@@ -308,6 +303,32 @@ final class HTTPClient {
         var text = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         var options = HTTPRequestOptions()
         guard !text.isEmpty else { return (text, options) }
+        // 一批图站把参数直接写在 query，且 query 里又带 `,{...}` 形式的
+        // 显示模板（例如 `...?q=美足,{“title”:“美足”}`）。
+        // 这里的 `,{` 是页面内容，不是请求选项；不加协议前缀时还会被
+        // 系统判成 unsupportedURL。先在合法 `?` 处截断，再做原有解析。
+        if let question = text.firstIndex(of: "?"),
+           let comma = text[question...].firstIndex(of: ",") {
+            let candidate = String(text[..<comma]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let beforeQuestion = String(text[..<question]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty, !beforeQuestion.isEmpty,
+               candidate.lowercased().hasPrefix("http://") || candidate.lowercased().hasPrefix("https://") {
+                text = candidate
+            }
+        }
+        // 裸域名 / `//host/path` 在 URLSession 里会报“链接格式不支持”。
+        // 图站源经常省略 scheme，这里在请求入口统一补齐。
+        if text.hasPrefix("//") {
+            text = "https:" + text
+        } else if !text.lowercased().hasPrefix("http://"),
+                  !text.lowercased().hasPrefix("https://"),
+                  !text.hasPrefix("data:"),
+                  !text.hasPrefix("javascript:"),
+                  !text.hasPrefix("mailto:"),
+                  let host = URLComponents(string: "https://" + text)?.host,
+                  !host.isEmpty {
+            text = "https://" + text
+        }
 
         if let split = splitTrailingOptions(text) {
             if let dictionary = optionObject(from: split.options) {
@@ -566,11 +587,6 @@ enum NetworkError: LocalizedError {
     case timeout
     case responseTooLarge(Int)
 
-    /// URL scheme 不被 URLSession 支持（非 http/https）。原先这类地址会走到
-    /// URLSession 才抛 NSURLErrorUnsupportedURL(-1002)，现在在 buildRequest
-    /// 提前拦截，调用方可据此回退到内嵌 WebView 而不是直接报错。
-    case unsupportedScheme(String)
-
     var errorDescription: String? {
         switch self {
         case .invalidURL(let value): return "链接无效：" + value
@@ -580,7 +596,6 @@ enum NetworkError: LocalizedError {
         case .timeout: return "请求超时"
         case .responseTooLarge(let bytes):
             return "内容过大（" + String(bytes / 1024 / 1024) + "MB），已中止"
-        case .unsupportedScheme(let value): return "链接格式不支持：" + value
         }
     }
 }

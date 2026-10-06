@@ -1504,6 +1504,22 @@ final class RssTests: XCTestCase {
         XCTAssertNotNil(handled)
     }
 
+    /// 图站 URL query 里的 `,{...}` 是内容模板，不是请求选项；
+    /// 裸域名必须补 scheme。否则 URLSession 报“链接格式不支持”。
+    func testURLRulePreservesQueryTemplateAndAddsScheme() {
+        let bare = HTTPClient.parseURLRule("www.missav.com/dm5/cn/mifoot")
+        XCTAssertTrue(bare.url.hasPrefix("https://www.missav.com/"))
+
+        let queryTemplate = HTTPClient.parseURLRule(
+            "https://example.com/list?q=美足,{\"title\":\"美足\"}"
+        )
+        XCTAssertEqual(queryTemplate.url, "https://example.com/list?q=美足")
+
+        let option = HTTPClient.parseURLRule("https://example.com/api,{\"method\":\"POST\"}")
+        XCTAssertEqual(option.url, "https://example.com/api")
+        XCTAssertEqual(option.options.method, "POST")
+    }
+
     /// 正文节点要保留段落：块级标签之间必须有换行，否则整章被压成一行
     func testParagraphStringsKeepLineBreaks() {
         let html = "<div class=\"content\"><p>第一段</p><p>第二段</p></div>"

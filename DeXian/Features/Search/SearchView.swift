@@ -6,9 +6,12 @@ struct SearchView: View {
     @EnvironmentObject private var sources: SourceStore
     @EnvironmentObject private var shelf: ShelfStore
 
-    @EnvironmentObject private var viewModel: SearchViewModel
+    @StateObject private var viewModel = SearchViewModel()
     @State private var input: String = ""
     @FocusState private var isFocused: Bool
+    @State private var showAuthOverlay = false
+
+    @ObservedObject private var webAuth = WebAuthPresenter.shared
 
     var body: some View {
         ZStack {
@@ -34,6 +37,18 @@ struct SearchView: View {
             input = keyword
             appState.searchKeyword = nil
             performSearch(keyword: keyword)
+        }
+        .onChange(of: webAuth.request) { request in
+            withAnimation(.easeOut(duration: 0.18)) { showAuthOverlay = request != nil }
+        }
+        .overlay(alignment: .top) {
+            if showAuthOverlay, let request = webAuth.request {
+                WebAuthBannerView(request: request, presenter: webAuth) {
+                    showAuthOverlay = false
+                }
+                .zIndex(2)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
     }
 
@@ -295,5 +310,80 @@ struct SearchView: View {
         } else {
             appState.show("书架里已有这本书")
         }
+    }
+}
+
+/// 搜索页内嵌验证条：不盖住结果列表，不把用户推离搜索页。
+/// WebView 以可折叠面板形式显示；完成后回到同一个搜索视图继续看结果。
+struct WebAuthBannerView: View {
+    let request: WebAuthPresenter.Request
+    @ObservedObject var presenter: WebAuthPresenter
+    var onDismiss: () -> Void = {}
+
+    @State private var isExpanded = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Palette.warning)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(request.title)
+                        .font(.themeCaption.bold())
+                        .foregroundStyle(Theme.ColorToken.textPrimary)
+                    Text(request.url)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.ColorToken.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: Theme.Spacing.sm)
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { isExpanded.toggle() }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+
+                Button("完成") {
+                    presenter.complete(cookie: "")
+                    onDismiss()
+                }
+                .font(.themeCaption.semibold())
+
+                Button("退出") {
+                    presenter.skip()
+                    onDismiss()
+                }
+                .font(.themeCaption)
+            }
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.sm)
+            .background(.regularMaterial)
+
+            if isExpanded {
+                WebAuthWebView(
+                    urlString: request.url,
+                    sourceKey: request.sourceKey,
+                    cookie: .constant(""),
+                    isLoading: .constant(false),
+                    lastError: .constant(nil)
+                )
+                .frame(height: 320)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous)
+                .stroke(Theme.ColorToken.separator, lineWidth: 0.8)
+        )
+        .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.top, Theme.Spacing.xl)
     }
 }

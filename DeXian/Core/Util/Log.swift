@@ -41,4 +41,26 @@ enum Log {
         buffer.removeAll()
         lock.unlock()
     }
+
+    /// 导出成 TXT：日志面板可另存，不再只能复制到剪贴板。
+    static func exportText() -> String {
+        let entries = recent
+        var lines: [String] = []
+        lines.append("得闲 DeXian 调试日志")
+        lines.append("版本 " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""))
+        lines.append("构建 " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""))
+        lines.append("导出时间 " + Date().formatted(date: .numeric, time: .standard))
+        lines.append("")
+        for entry in entries {
+            let time = entry.date.formatted(date: .omitted, time: .standard)
+            lines.append("[" + time + "] [" + entry.category + "] " + entry.message)
+        }
+        let crash = CrashReporter.lastReport
+        if let crash, !crash.isEmpty {
+            lines.append("")
+            lines.append("=== 上次闪退现场 ===")
+            lines.append(crash)
+        }
+        return lines.joined(separator: "\n")
+    }
 }
