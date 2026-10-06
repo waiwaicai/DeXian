@@ -382,6 +382,37 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(result.skipped, 1)
     }
 
+    func testImportLargeYckceoCollectionStructure() {
+        // yckceo 1305 这类合集是 JSON 数组；exploreUrl 又是内嵌 JSON 字符串，
+        // 并额外带 customButton / eventListener 字段。这里锁住这两个兼容点。
+        let exploreItems = [["title": "都市", "url": "/class/1/{{page}}.html", "style": ["layout_flexGrow": 1]]] as [[String: Any]]
+        let exploreData = try! JSONSerialization.data(withJSONObject: exploreItems)
+        let exploreJSON = String(data: exploreData, encoding: .utf8)!
+        let payload: [[String: Any]] = [
+            [
+                "bookSourceName": "大合集源",
+                "bookSourceUrl": "https://large.test",
+                "bookSourceType": 2,
+                "enabled": true,
+                "enabledExplore": true,
+                "customButton": ["name": "测试"],
+                "eventListener": "console.log('ok')",
+                "exploreUrl": exploreJSON,
+                "searchUrl": "https://large.test/search?q={{key}}",
+                "ruleSearch": ["bookList": ".item", "name": ".name@text", "bookUrl": "a@href"],
+                "ruleExplore": ["bookList": ".book", "name": ".title@text", "bookUrl": "a@href"]
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let result = SourceImporter.parse(text: String(data: data, encoding: .utf8)!)
+        XCTAssertEqual(result.sources.count, 1)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(result.sources.first?.type, .image)
+        XCTAssertEqual(result.sources.first?.category.items.first?.title, "都市")
+        XCTAssertEqual(result.sources.first?.category.items.first?.url, "/class/1/{{page}}.html")
+        XCTAssertEqual(SourceImporter.importDownloadTimeout, 180)
+    }
+
     func testImportNDJSON() {
         let text = """
         {"bookSourceName":"行一","bookSourceUrl":"https://h1.com"}

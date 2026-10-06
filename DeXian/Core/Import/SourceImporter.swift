@@ -42,6 +42,8 @@ enum SourceImporter {
     static let maxScanBytes = 24 * 1024 * 1024
     /// 分享文本中最多保留多少个 JSON 候选片段
     static let maxCandidates = 8
+    /// 大书源合集的专用导入下载超时；普通书源请求仍使用全局 15/30 秒保护。
+    static let importDownloadTimeout: TimeInterval = 180
 
     enum ImportLimitError: LocalizedError {
         case tooLarge(Int)
@@ -174,14 +176,18 @@ enum SourceImporter {
         }
     }
 
-    /// 从网络地址导入（支持重定向与纯文本）
+    /// 从网络地址导入（支持重定向与纯文本）。
+    ///
+    /// 1305 这类合集有 7.7MB / 898 个源，手机网络下可能超过 30 秒。
+    /// 导入链路使用专用长超时，普通书源请求仍保持现有全局保护。
     static func importFromURL(_ urlString: String, preferRss: Bool = false) async throws -> ImportResult {
-        let response = try await HTTPClient.shared.request(urlString: urlString, options: HTTPRequestOptions())
+        let options = HTTPRequestOptions(timeout: SourceImporter.importDownloadTimeout)
+        let response = try await HTTPClient.shared.request(urlString: urlString, options: options)
         var result = parse(text: response.text, preferRss: preferRss)
         if result.isEmpty {
             // 有些链接直接指向文件，尝试用最终 URL 再取一次
             if let finalURL = response.finalURL?.absoluteString, finalURL != urlString {
-                let retry = try await HTTPClient.shared.request(urlString: finalURL, options: HTTPRequestOptions())
+                let retry = try await HTTPClient.shared.request(urlString: finalURL, options: options)
                 result = parse(text: retry.text, preferRss: preferRss)
             }
         }
