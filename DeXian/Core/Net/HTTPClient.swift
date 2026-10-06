@@ -26,6 +26,8 @@ struct HTTPRequestOptions {
     var webView = false
     var retry: Int = 0
     var timeout: TimeInterval = 30
+    /// 整个传输阶段允许的最长时间；默认沿用普通请求的 30 秒。
+    var resourceTimeout: TimeInterval = 30
     /// Legado 的 `{"type":...}`：响应体按**十六进制**文本给出。
     ///
     /// 见 `dataURIResponse`。只有 `data:` 地址上的 type 才有意义。
@@ -37,6 +39,7 @@ final class HTTPClient {
     static let shared = HTTPClient()
 
     private let session: URLSession
+    private let importSession: URLSession
 
     private init() {
         let configuration = URLSessionConfiguration.default
@@ -54,6 +57,11 @@ final class HTTPClient {
         ]
         let delegate = HTTPClientDelegate()
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+
+        let importConfiguration = configuration
+        importConfiguration.timeoutIntervalForRequest = 60
+        importConfiguration.timeoutIntervalForResource = 180
+        importSession = URLSession(configuration: importConfiguration, delegate: delegate, delegateQueue: nil)
     }
 
     /// 发起异步请求
@@ -79,7 +87,8 @@ final class HTTPClient {
             defaultHeaders: defaultHeaders,
             base: base
         )
-        let (data, response) = try await session.data(for: request)
+        let client = options.resourceTimeout > 30 ? importSession : session
+        let (data, response) = try await client.data(for: request)
         try Self.checkDeclaredSize(response)
         guard data.count <= Self.maxResponseBytes else {
             throw NetworkError.responseTooLarge(data.count)

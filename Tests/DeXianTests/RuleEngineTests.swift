@@ -408,8 +408,9 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(result.sources.count, 1)
         XCTAssertEqual(result.skipped, 0)
         XCTAssertEqual(result.sources.first?.type, .image)
-        XCTAssertEqual(result.sources.first?.category.items.first?.title, "都市")
-        XCTAssertEqual(result.sources.first?.category.items.first?.url, "/class/1/{{page}}.html")
+        let page = ExplorePage.parse(result.sources.first?.exploreUrl)
+        XCTAssertEqual(page.categories.first?.title, "都市")
+        XCTAssertEqual(page.categories.first?.url, "/class/1/{{page}}.html")
         XCTAssertEqual(SourceImporter.importDownloadTimeout, 180)
     }
 

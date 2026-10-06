@@ -181,7 +181,10 @@ enum SourceImporter {
     /// 1305 这类合集有 7.7MB / 898 个源，手机网络下可能超过 30 秒。
     /// 导入链路使用专用长超时，普通书源请求仍保持现有全局保护。
     static func importFromURL(_ urlString: String, preferRss: Bool = false) async throws -> ImportResult {
-        let options = HTTPRequestOptions(timeout: SourceImporter.importDownloadTimeout)
+        let options = HTTPRequestOptions(
+            timeout: SourceImporter.importDownloadTimeout,
+            resourceTimeout: SourceImporter.importDownloadTimeout
+        )
         let response = try await HTTPClient.shared.request(urlString: urlString, options: options)
         var result = parse(text: response.text, preferRss: preferRss)
         if result.isEmpty {
