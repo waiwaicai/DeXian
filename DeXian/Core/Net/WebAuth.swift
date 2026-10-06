@@ -16,7 +16,7 @@ import WebKit
 final class WebAuthPresenter: ObservableObject {
     static let shared = WebAuthPresenter()
 
-    struct Request: Identifiable {
+    struct Request: Identifiable, Equatable {
         var id = UUID()
         var url: String
         var title: String

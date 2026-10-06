@@ -354,7 +354,7 @@ struct WebAuthBannerView: View {
                     presenter.complete(cookie: "")
                     onDismiss()
                 }
-                .font(.themeCaption.semibold())
+                .font(.themeCaption.bold())
 
                 Button("退出") {
                     presenter.skip()
