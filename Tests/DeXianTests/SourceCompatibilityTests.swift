@@ -23,7 +23,7 @@ final class SourceCompatibilityTests: XCTestCase {
         let json = """
         [{"name":"去广告","pattern":"内部推广.*","replacement":""},
          {"name":"标点","find":"。。。","replace":"。"},
-         "单独正则"]
+         {"name":"单独","pattern":"单独正则"}]
         """
         let purifier = ContentPurifier(sourceRule: nil, userRulesJSON: json)
         let output = purifier.purify("正文。内部推广链接。。。单独正则文本")

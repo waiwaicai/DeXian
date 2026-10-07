@@ -40,7 +40,10 @@ struct ContentPurifier {
         } else if let object = value as? [String: Any] {
             userRules = [Self.rule(from: object)].compactMap { $0 }
         } else if let array = value as? [String] {
-            userRules = array.map { Rule(name: nil, pattern: $0, find: nil, replacement: nil, replace: nil, enabled: true) }
+            userRules = array.compactMap { raw in
+                let pattern = NSRegularExpression.escapedPattern(for: raw)
+                return Rule(name: nil, pattern: pattern, find: nil, replacement: nil, replace: nil, enabled: true)
+            }
         } else {
             userRules = []
         }
@@ -103,6 +106,12 @@ struct ContentPurifier {
         for rule in rules {
             result = RuleUtil.regexReplace(result, pattern: rule.pattern, replacement: rule.replacement)
         }
+        // 移除全行广告后留下的空行；避免“正文 + 空行 + 正文”被误判成残留。
+        result = result
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         result = HTMLNode.collapseNewlines(result)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
