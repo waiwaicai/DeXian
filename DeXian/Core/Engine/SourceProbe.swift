@@ -65,7 +65,10 @@ enum SourceProbe {
             "不支持搜索",
             "搜索无结果",
             "服务器响应异常",
-            "内容为空"
+            "内容为空",
+            "正文为空",
+            "目录为空",
+            "正文过短"
         ]
     }
 
@@ -84,6 +87,47 @@ enum SourceProbe {
             return .valid(count: books.count)
         } catch {
             return .invalid(reason: SourceError.describe(error))
+        }
+    }
+
+
+    /// 基于真实正文的兼容性诊断；搜索成功但正文为空/过短的源也要被识别。
+    static func probeContent(
+        _ source: BookSource,
+        keyword: String,
+        engine: SourceEngine? = nil
+    ) async -> State {
+        let resolvedEngine = engine ?? SourceEngine(source: source)
+        do {
+            let books = try await resolvedEngine.search(keyword: keyword, page: 1)
+            guard let first = books.first else { return .invalid(reason: "搜索无结果") }
+            let chapters = try await resolvedEngine.toc(
+                tocUrl: first.bookUrl,
+                bookInfo: ["name": first.name, "author": first.author, "bookUrl": first.bookUrl]
+            )
+            guard let chapter = chapters.first else {
+                return .invalid(reason: first.type == .image || first.type == .video || first.type == .audio ? "正文为空" : "目录为空")
+            }
+            let content = try await resolvedEngine.content(
+                chapterUrl: chapter.url,
+                bookInfo: ["name": first.name, "author": first.author, "bookUrl": first.bookUrl],
+                chapterInfo: ["title": chapter.title, "url": chapter.url, "index": String(chapter.index), "bookUrl": first.bookUrl],
+                chapterTitle: chapter.title
+            )
+            if first.type == .image {
+                return content.images.isEmpty ? .invalid(reason: "正文为空") : .valid(count: content.images.count)
+            }
+            if first.type == .video {
+                return content.text.isEmpty ? .invalid(reason: "正文为空") : .valid(count: 1)
+            }
+            if first.type == .audio {
+                return content.text.isEmpty ? .invalid(reason: "正文为空") : .valid(count: 1)
+            }
+            let count = content.text.count
+            guard count >= 30 else { return .contentTooShort(count) }
+            return .valid(count: 1)
+        } catch {
+            return .error(SourceError.describe(error))
         }
     }
 }

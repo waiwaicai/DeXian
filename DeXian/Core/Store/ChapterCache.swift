@@ -133,6 +133,20 @@ final class ChapterCache: ObservableObject {
         }
     }
 
+    /// 清理单个坏章节缓存；meta 状态同步回未缓存，便于下次重新抓取。
+    func remove(bookId: String, chapterUrl: String) {
+        let file = chapterFile(bookId: bookId, chapterUrl: chapterUrl)
+        if var meta = metaCache[bookId] {
+            meta.states[chapterKey(chapterUrl)] = .none
+            meta.updatedAt = Date()
+            metaCache[bookId] = meta
+            saveMeta(meta)
+        }
+        Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
     // MARK: 下载
 
     /// 取消正在进行的整本下载

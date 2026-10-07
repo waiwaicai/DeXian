@@ -9,10 +9,6 @@ final class AppState: ObservableObject {
     let shelf = ShelfStore()
     let settings = SettingsStore()
 
-    /// Owned by AppState so the WebAuth sheet present/dismiss
-    /// cannot recreate the search page view model and lose results.
-    let searchViewModel = SearchViewModel()
-
     /// 标签页选择
     @Published var selectedTab: RootView.Tab = .shelf
     /// 阅读页跳转目标
@@ -60,6 +56,8 @@ final class AppState: ObservableObject {
 /// 阅读与界面设置
 @MainActor
 final class SettingsStore: ObservableObject {
+
+    static var shared: SettingsStore?
 
     enum Appearance: String, CaseIterable, Codable {
         case system, light, dark
@@ -158,6 +156,7 @@ final class SettingsStore: ObservableObject {
         var autoReadContinuous: Bool?
         var readerTheme: ReaderTheme?
         var useSystemAppearanceForReader: Bool?
+        var purifierRulesJSON: String?
     }
 
     @Published var appearance: Appearance = .system { didSet { persist() } }
@@ -185,8 +184,11 @@ final class SettingsStore: ObservableObject {
     @Published var readerTheme: ReaderTheme = .paper { didSet { persist() } }
     /// 阅读界面是否跟随系统深色（关闭后强制使用所选配色）
     @Published var readerFollowsSystem: Bool = true { didSet { persist() } }
+    /// 正文净化规则（JSON），最高优先级；书源自带的 replaceRegex 仍会生效。
+    @Published var purifierRulesJSON: String = "" { didSet { persist() } }
 
     init() {
+        if SettingsStore.shared == nil { SettingsStore.shared = self }
         if let snapshot = FileStorage.load(Snapshot.self, from: "settings.json") {
             appearance = snapshot.appearance
             fontSize = snapshot.fontSize
@@ -205,6 +207,7 @@ final class SettingsStore: ObservableObject {
             autoReadContinuous = snapshot.autoReadContinuous ?? true
             readerTheme = snapshot.readerTheme ?? .paper
             readerFollowsSystem = snapshot.useSystemAppearanceForReader ?? true
+            purifierRulesJSON = snapshot.purifierRulesJSON ?? ""
         }
     }
 
@@ -226,7 +229,8 @@ final class SettingsStore: ObservableObject {
             autoReadSpeed: autoReadSpeed,
             autoReadContinuous: autoReadContinuous,
             readerTheme: readerTheme,
-            useSystemAppearanceForReader: readerFollowsSystem
+            useSystemAppearanceForReader: readerFollowsSystem,
+            purifierRulesJSON: purifierRulesJSON
         )
         FileStorage.save(snapshot, to: "settings.json")
     }

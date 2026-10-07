@@ -320,6 +320,14 @@ final class ReaderViewModel: ObservableObject {
             state = .loaded
             isLoadingContent = false
             saveProgressForChapter(index, chapter, preserveOffset: true)
+            // 缓存正文为空时清掉坏缓存，下一次加载会重新抓源
+            if book.type == .image {
+                if offline.images.isEmpty {
+                    ChapterCache.shared.remove(bookId: book.id, chapterUrl: chapter.url)
+                }
+            } else if offline.text.count < 20 {
+                ChapterCache.shared.remove(bookId: book.id, chapterUrl: chapter.url)
+            }
             return
         }
 

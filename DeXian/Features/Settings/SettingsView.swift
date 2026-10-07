@@ -64,10 +64,22 @@ struct SettingsView: View {
                     detail: "筛出失效源并一键清除"
                 )
             }
+
+            NavigationLink {
+                PurifierEditorView()
+            } label: {
+                settingsRow(
+                    icon: "wand.and.stars",
+                    color: Theme.Palette.success,
+                    title: "正文净化规则",
+                    detail: settings.purifierRulesJSON.isEmpty ? "内置规则 + 书源规则" : "自定义 + 书源规则"
+                )
+            }
         } header: {
             Text("书源")
         } footer: {
-            Text("支持导入阅读（Legado）格式书源，包括 yckceo 书源仓库的分享链接。")
+            Text("支持 Legado 书源与 yckceo 分享链接。自动移除推广链接、更新提示和站内导航；"
+                 + "失效源可探测清理，也可添加自定义净化正则。")
         }
     }
 
@@ -248,6 +260,64 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.ColorToken.textTertiary)
             }
         }
+    }
+}
+
+/// 正文净化规则编辑器。
+///
+/// 使用 JSON 数组，兼容三种写法：
+/// `{"name":"去推广","pattern":"正则","replacement":""}`、
+/// `{"name":"替换","find":"原文","replace":"新文"}`、`"广告文案"`。
+struct PurifierEditorView: View {
+    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var settings: SettingsStore
+    @State private var text: String = ""
+    @State private var sample: String = "正文第一段。\n请收藏本站 www.example.com\n本章未完，请点击下一页继续阅读。"
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 180)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            } header: {
+                Text("规则 JSON")
+            } footer: {
+                Text("留空只使用内置净化。示例：\n[{\"name\":\"去推广\",\"pattern\":\"请收藏本站.*\",\"replacement\":\"\"}]")
+            }
+
+            Section {
+                TextEditor(text: $sample)
+                    .font(.system(size: 13, design: .monospaced))
+                    .frame(minHeight: 110)
+                Button {
+                    apply()
+                } label: {
+                    Label("测试并保存", systemImage: "checkmark.circle")
+                }
+                Button(role: .destructive) {
+                    settings.purifierRulesJSON = ""
+                    text = ""
+                    appState.show("已恢复内置净化", style: .success)
+                } label: {
+                    Label("恢复默认", systemImage: "arrow.counterclockwise")
+                }
+            } header: {
+                Text("预览")
+            }
+        }
+        .navigationTitle("正文净化规则")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { text = settings.purifierRulesJSON }
+    }
+
+    private func apply() {
+        let purifier = ContentPurifier(sourceRule: nil, userRulesJSON: text)
+        let output = purifier.purify(sample)
+        settings.purifierRulesJSON = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        appState.show("已保存；预览结果 \(output.count) 字", style: .success)
     }
 }
 

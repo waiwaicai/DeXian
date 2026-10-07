@@ -185,7 +185,8 @@ final class SearchViewModel: ObservableObject {
                         let outcome = await Self.withTimeout(perSource) {
                             let engine = SourceEngine(source: source)
                             do {
-                                return .success(try await engine.search(keyword: value, page: page))
+                                let books = try await engine.search(keyword: value, page: page)
+                                return .success(books)
                             } catch {
                                 return .failure(error)
                             }
@@ -206,7 +207,8 @@ final class SearchViewModel: ObservableObject {
                             let outcome = await Self.withTimeout(perSource) {
                                 let engine = SourceEngine(source: source)
                                 do {
-                                    return .success(try await engine.search(keyword: value, page: page))
+                                    let books = try await engine.search(keyword: value, page: page)
+                                    return .success(books)
                                 } catch {
                                     return .failure(error)
                                 }

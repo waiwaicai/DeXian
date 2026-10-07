@@ -520,7 +520,7 @@ final class SourceEngine {
             }
         }
 
-        // 正文净化
+        // 正文净化：书源规则 + 全局/用户净化规则
         text = cleanContent(text)
         images = dedupeImages(images)
 
@@ -1416,9 +1416,14 @@ final class SourceEngine {
             result = result.replacingOccurrences(of: pattern, with: "")
         }
 
-        // 统一段落
-        result = HTMLNode.collapseNewlines(result)
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 统一段落并应用内置 / 用户净化规则
+        let purifier = ContentPurifier(
+            sourceRule: source.contentRule.replaceRegex,
+            userRulesJSON: SettingsStore.shared?.purifierRulesJSON
+        )
+        return purifier
+            .purify(HTMLNode.collapseNewlines(result))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 从正文 HTML / 文本中提取图片链接
