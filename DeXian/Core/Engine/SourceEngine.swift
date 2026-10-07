@@ -1417,10 +1417,7 @@ final class SourceEngine {
         }
 
         // 统一段落并应用内置 / 用户净化规则
-        let purifier = ContentPurifier(
-            sourceRule: source.contentRule.replaceRegex,
-            userRulesJSON: SettingsStore.shared?.purifierRulesJSON
-        )
+        let purifier = ContentPurifier(sourceRule: source.contentRule.replaceRegex)
         return purifier
             .purify(HTMLNode.collapseNewlines(result))
             .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -124,10 +124,10 @@ enum SourceProbe {
                 return content.text.isEmpty ? .invalid(reason: "正文为空") : .valid(count: 1)
             }
             let count = content.text.count
-            guard count >= 30 else { return .contentTooShort(count) }
+            guard count >= 30 else { return .invalid(reason: SourceCompatibility.describe(.contentTooShort(count))) }
             return .valid(count: 1)
         } catch {
-            return .error(SourceError.describe(error))
+            return .invalid(reason: SourceError.describe(error))
         }
     }
 }
