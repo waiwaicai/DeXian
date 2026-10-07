@@ -21,7 +21,7 @@ final class SourceCompatibilityTests: XCTestCase {
 
     func testPurifierSupportsUserRegexAndPlainTextRules() {
         let json = """
-        [{"name":"去广告","pattern":"内部推广.*","replacement":""},
+        [{"name":"去广告","pattern":"内部推广链接","replacement":""},
          {"name":"标点","find":"。。。","replace":"。"},
          {"name":"单独","pattern":"单独正则"}]
         """
