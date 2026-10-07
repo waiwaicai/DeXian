@@ -14,7 +14,7 @@ final class SourceCompatibilityTests: XCTestCase {
         let output = purifier.purify(input)
         XCTAssertFalse(output.contains("请收藏本站"))
         XCTAssertFalse(output.contains("本章未完"))
-        XCTAssertFalse(output.contains("www.site.top"))
+        XCTAssertFalse(output.contains("site.top"))
         XCTAssertTrue(output.contains("正文开始"))
         XCTAssertTrue(output.contains("正文结束"))
     }

@@ -106,6 +106,12 @@ struct ContentPurifier {
         for rule in rules {
             result = RuleUtil.regexReplace(result, pattern: rule.pattern, replacement: rule.replacement)
         }
+        // 收尾去掉只剩分隔符的空行，避免广告行删除后留下大量空白。
+        result = result
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         result = HTMLNode.collapseNewlines(result)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
