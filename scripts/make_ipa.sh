@@ -88,12 +88,18 @@ cp -R "$APP_PATH" "$WORK/Payload/"
 # 移除旧的签名残留，便于自签工具处理
 rm -rf "$WORK/Payload/$SCHEME.app/_CodeSignature" 2>/dev/null || true
 
-# sideLoad 版本核对：xcodegen 在归档时没有展开 MARKETING_VERSION，
-# 这里直接写入实际短版本，避免侧载工具把它当成旧包。
+# sideLoad 版本核对：xcodegen 在归档时可能没有展开版本变量，
+# 这里从 project.yml 读取真实版本并写入，避免包里残留旧版本号。
 PLIST="$WORK/Payload/$SCHEME.app/Info.plist"
 if [ -f "$PLIST" ]; then
-  SHORT_VERSION="1.0.23"
+  SHORT_VERSION="$(sed -n 's/.*MARKETING_VERSION:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/project.yml" | tail -n 1)"
+  BUILD_VERSION="$(sed -n 's/.*CURRENT_PROJECT_VERSION:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/project.yml" | tail -n 1)"
+  if [ -z "$SHORT_VERSION" ] || [ -z "$BUILD_VERSION" ]; then
+    echo "错误：无法从 project.yml 读取版本号" >&2
+    exit 1
+  fi
   plutil -replace CFBundleShortVersionString -string "$SHORT_VERSION" "$PLIST"
+  plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$PLIST"
 fi
 
 ( cd "$WORK" && zip -qry "$OUTPUT_DIR/$IPA_NAME" Payload )

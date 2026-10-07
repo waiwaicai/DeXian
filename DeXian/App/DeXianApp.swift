@@ -25,7 +25,6 @@ struct DeXianApp: App {
                 .environmentObject(appState.rss)
                 .environmentObject(appState.shelf)
                 .environmentObject(appState.settings)
-                .environmentObject(appState.searchViewModel)
                 .preferredColorScheme(appState.settings.appearance.colorScheme)
                 .tint(Theme.Palette.brand)
                 // 写盘有 300ms 合并窗口；被挂起前必须刷一次，否则改动会丢
@@ -41,10 +40,6 @@ struct DeXianApp: App {
                     // 标记只在前台时保留，而前台被杀正是闪退。
                     if phase == .background { CrashReporter.endSession() }
                 }
-                // 书源需要用户过验证 / 登录时弹出网页
-                .sheet(item: $webAuth.request) { request in
-                    WebAuthView(request: request, presenter: webAuth)
-                }
                 // 启动完成后标记「本次运行开始」：
                 // 下次启动若发现标记还在，就说明上次是被系统强杀的
                 //（内存超限或看门狗），这类崩溃不会留下崩溃报告。
@@ -58,6 +53,7 @@ struct RootView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var sources: SourceStore
     @EnvironmentObject private var shelf: ShelfStore
+    @ObservedObject private var webAuth = WebAuthPresenter.shared
 
     enum Tab: Hashable {
         case shelf, explore, rss, search, settings
@@ -95,6 +91,16 @@ struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.22), value: appState.toast)
+        // 全局内嵌验证条：不使用 sheet / fullScreenCover，
+        // 避免关闭验证时把搜索页、详情页或当前导航栈一起顶掉。
+        .overlay(alignment: .top) {
+            if let request = webAuth.request {
+                WebAuthBannerView(request: request, presenter: webAuth)
+                    .zIndex(3)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: webAuth.request)
         .fullScreenCover(item: $appState.readingBook) { book in
             NavigationStack {
                 ReaderView(book: book, source: sources.source(id: book.origin), shelf: shelf)

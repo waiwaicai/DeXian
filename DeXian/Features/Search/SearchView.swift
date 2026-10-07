@@ -9,9 +9,6 @@ struct SearchView: View {
     @StateObject private var viewModel = SearchViewModel()
     @State private var input: String = ""
     @FocusState private var isFocused: Bool
-    @State private var showAuthOverlay = false
-
-    @ObservedObject private var webAuth = WebAuthPresenter.shared
 
     var body: some View {
         ZStack {
@@ -37,18 +34,6 @@ struct SearchView: View {
             input = keyword
             appState.searchKeyword = nil
             performSearch(keyword: keyword)
-        }
-        .onChange(of: webAuth.request) { request in
-            withAnimation(.easeOut(duration: 0.18)) { showAuthOverlay = request != nil }
-        }
-        .overlay(alignment: .top) {
-            if showAuthOverlay, let request = webAuth.request {
-                WebAuthBannerView(request: request, presenter: webAuth) {
-                    showAuthOverlay = false
-                }
-                .zIndex(2)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
         }
     }
 
