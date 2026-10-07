@@ -40,7 +40,6 @@ final class SourceCompatibilityTests: XCTestCase {
             "ruleContent": ["content": "body"]
         ])!
         let engine = SourceEngine(source: source)
-        SettingsStore.shared = SettingsStore()
         let output = engine.cleanContent("正文。\n请记住本站域名 example.com\n结束。")
         XCTAssertTrue(output.contains("正文。"))
         XCTAssertFalse(output.contains("请记住本站域名"))
