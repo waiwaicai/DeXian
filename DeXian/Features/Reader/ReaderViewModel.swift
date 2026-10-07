@@ -308,6 +308,7 @@ final class ReaderViewModel: ObservableObject {
             images = cached.images
             state = .loaded
             isLoadingContent = false
+            saveProgressForChapter(index, chapter, preserveOffset: true)
             return
         }
 
@@ -318,6 +319,7 @@ final class ReaderViewModel: ObservableObject {
             images = offline.images
             state = .loaded
             isLoadingContent = false
+            saveProgressForChapter(index, chapter, preserveOffset: true)
             return
         }
 
@@ -374,12 +376,7 @@ final class ReaderViewModel: ObservableObject {
                 )
                 self.isLoadingContent = false
                 self.shelf.updateVariables(bookId: self.book.id, variables: engine.variableSnapshot)
-                self.shelf.updateProgress(
-                    bookId: self.book.id,
-                    chapterIndex: index,
-                    chapterTitle: chapter.title,
-                    offset: 0
-                )
+                self.saveProgressForChapter(index, chapter, preserveOffset: true)
             } catch {
                 // 同上：过期的失败不能覆盖当前章节的状态
                 guard !Task.isCancelled, self.currentChapter?.url == chapter.url else { return }
@@ -576,6 +573,25 @@ final class ReaderViewModel: ObservableObject {
 
     func seek(to index: Int) async {
         await loadContent(index: index)
+    }
+
+    /// 保存章节内页码 / 滚动位置。
+    ///
+    /// 旧逻辑只在联网抓到正文后把 offset 清零，缓存章节和翻页位置都不会落盘，
+    /// 用户退出再进就会回到本章第一页。这里供阅读视图在翻页时调用。
+    func saveReadingOffset(_ offset: Int) {
+        guard let chapter = currentChapter else { return }
+        saveProgressForChapter(currentIndex, chapter, offset: offset)
+    }
+
+    private func saveProgressForChapter(_ index: Int, _ chapter: BookChapter, preserveOffset: Bool = false, offset: Int? = nil) {
+        let resolvedOffset = offset ?? (preserveOffset && book.lastReadChapterIndex == index ? book.lastReadOffset : 0)
+        shelf.updateProgress(
+            bookId: book.id,
+            chapterIndex: index,
+            chapterTitle: chapter.title,
+            offset: resolvedOffset
+        )
     }
 }
 

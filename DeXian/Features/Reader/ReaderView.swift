@@ -673,6 +673,13 @@ struct PagedReaderView: View {
             .onChange(of: geometry.size) { value in size = value }
         }
         .task(id: layoutKey) { await repaginate() }
+        .onAppear {
+            // 恢复本章页码。lastReadOffset 在翻页模式下复用为页下标；
+            // 新章节从第 0 页开始，只有当前章等于持久化进度时才恢复。
+            if viewModel.currentIndex == viewModel.book.lastReadChapterIndex {
+                pageIndex = max(0, viewModel.book.lastReadOffset)
+            }
+        }
         .contentShape(Rectangle())
         // 翻页手势统一走 simultaneousGesture。
         //
@@ -872,6 +879,7 @@ struct PagedReaderView: View {
             pageIndex = 0
             Task { await viewModel.goNext() }
         }
+        viewModel.saveReadingOffset(pageIndex)
     }
 
     private func turnBackward() {
@@ -882,6 +890,7 @@ struct PagedReaderView: View {
         } else {
             Task { await viewModel.goPrevious() }
         }
+        viewModel.saveReadingOffset(pageIndex)
     }
 
     /// 无动画模式下直接改状态，其余模式包一层动画。
